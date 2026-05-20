@@ -10,9 +10,13 @@ from taskbot.utils import (
     clean_csv_tags,
     normalize_dev_environments,
     normalize_game_engine,
+    normalize_game_programs,
     normalize_job_role,
+    normalize_job_roles,
     normalize_priority,
     normalize_status,
+    normalize_task_types,
+    split_filter_values,
     now_iso,
     today_local,
 )
@@ -49,6 +53,7 @@ def init_db() -> None:
                 creator_id INTEGER NOT NULL,
                 due_date TEXT DEFAULT '',
                 tags TEXT DEFAULT '',
+                task_type TEXT DEFAULT '',
                 resource_links TEXT DEFAULT '',
                 thumbnail_url TEXT DEFAULT '',
                 positions_needed INTEGER NOT NULL DEFAULT 1,
@@ -56,6 +61,7 @@ def init_db() -> None:
                 dev_environment TEXT DEFAULT '',
                 game_engine TEXT DEFAULT '',
                 custom_game_engine TEXT DEFAULT '',
+                game_programs TEXT DEFAULT '',
                 archived INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -65,12 +71,14 @@ def init_db() -> None:
         for column, ddl in {
             "claim_thread_id": "INTEGER",
             "resource_links": "TEXT DEFAULT ''",
+            "task_type": "TEXT DEFAULT ''",
             "thumbnail_url": "TEXT DEFAULT ''",
             "positions_needed": "INTEGER NOT NULL DEFAULT 1",
             "job_role": "TEXT DEFAULT ''",
             "dev_environment": "TEXT DEFAULT ''",
             "game_engine": "TEXT DEFAULT ''",
             "custom_game_engine": "TEXT DEFAULT ''",
+            "game_programs": "TEXT DEFAULT ''",
         }.items():
             _ensure_column(conn, "tasks", column, ddl)
 
@@ -139,6 +147,7 @@ def init_db() -> None:
                 priority TEXT DEFAULT 'Medium',
                 due_date TEXT DEFAULT '',
                 tags TEXT DEFAULT '',
+                task_type TEXT DEFAULT '',
                 resource_links TEXT DEFAULT '',
                 thumbnail_url TEXT DEFAULT '',
                 positions_needed INTEGER NOT NULL DEFAULT 1,
@@ -146,6 +155,7 @@ def init_db() -> None:
                 dev_environment TEXT DEFAULT 'Windows',
                 game_engine TEXT DEFAULT 'Unity',
                 custom_game_engine TEXT DEFAULT '',
+                game_programs TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(guild_id, owner_id, name)
@@ -164,9 +174,35 @@ def init_db() -> None:
                 availability TEXT DEFAULT '',
                 preferred_roles TEXT DEFAULT '',
                 dev_environments TEXT DEFAULT '',
+                game_programs TEXT DEFAULT '',
                 profile_image_url TEXT DEFAULT '',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(guild_id, user_id)
+            )
+            """
+        )
+        _ensure_column(conn, "task_profiles", "game_programs", "TEXT DEFAULT ''")
+        _ensure_column(conn, "task_templates", "game_programs", "TEXT DEFAULT ''")
+        _ensure_column(conn, "task_templates", "task_type", "TEXT DEFAULT ''")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_subscriptions (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                job_role TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(guild_id, user_id, job_role)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_config (
+                guild_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY(guild_id, key)
             )
             """
         )
@@ -199,6 +235,7 @@ def create_task_record(
     *, guild_id: int, forum_channel_id: int, title: str, description: str, priority: str,
     creator_id: int, due_date: str, tags: str, resource_links: str, thumbnail_url: str,
     positions_needed: int, job_role: str, dev_environment: str, game_engine: str, custom_game_engine: str,
+    game_programs: str = "", task_type: str = "Feature",
 ) -> dict:
     timestamp = now_iso()
     with connect_db() as conn:
@@ -206,15 +243,15 @@ def create_task_record(
             """
             INSERT INTO tasks (
                 guild_id, forum_channel_id, title, description, status, priority, creator_id,
-                due_date, tags, resource_links, thumbnail_url, positions_needed, job_role,
-                dev_environment, game_engine, custom_game_engine, archived, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                due_date, tags, task_type, resource_links, thumbnail_url, positions_needed, job_role,
+                dev_environment, game_engine, custom_game_engine, game_programs, archived, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             """,
             (
                 guild_id, forum_channel_id, title, description, "To Do", normalize_priority(priority), creator_id,
-                due_date, clean_csv_tags(tags), resource_links.strip(), thumbnail_url.strip(), max(1, int(positions_needed)),
-                normalize_job_role(job_role), normalize_dev_environments(dev_environment), normalize_game_engine(game_engine),
-                custom_game_engine.strip(), timestamp, timestamp,
+                due_date, clean_csv_tags(tags), normalize_task_types(task_type), resource_links.strip(), thumbnail_url.strip(), max(1, int(positions_needed)),
+                normalize_job_roles(job_role), normalize_dev_environments(dev_environment), normalize_game_engine(game_engine),
+                custom_game_engine.strip(), normalize_game_programs(game_programs), timestamp, timestamp,
             ),
         )
         task_id = int(cur.lastrowid)
@@ -307,10 +344,19 @@ def claim_task(task_id: int, user_id: int) -> tuple[bool, str, Optional[dict]]:
     return True, "Claimed.", get_task(task_id)
 
 
+def _add_like_any(where: list[str], params: list[object], column: str, values: list[str]) -> None:
+    cleaned = [v for v in values if v]
+    if not cleaned:
+        return
+    where.append("(" + " OR ".join(f"LOWER({column}) LIKE LOWER(?)" for _ in cleaned) + ")")
+    params.extend(f"%{v}%" for v in cleaned)
+
+
 def search_tasks(
     *, guild_id: int, status: str | None = None, priority: str | None = None, tag: str | None = None,
-    claimer_id: int | None = None, creator_id: int | None = None, job_role: str | None = None,
-    dev_environment: str | None = None, game_engine: str | None = None, include_archived: bool = False, limit: int = 10,
+    creator_id: int | None = None, job_role: str | None = None, dev_environment: str | None = None,
+    game_engine: str | None = None, task_type: str | None = None, include_archived: bool = False, limit: int = 10,
+    claimer_id: int | None = None,
 ) -> list[dict]:
     where = ["t.guild_id = ?"]
     params: list[object] = [guild_id]
@@ -323,8 +369,7 @@ def search_tasks(
         where.append("LOWER(t.priority) = LOWER(?)")
         params.append(normalize_priority(priority))
     if tag:
-        where.append("LOWER(t.tags) LIKE LOWER(?)")
-        params.append(f"%{tag.strip()}%")
+        _add_like_any(where, params, "t.tags", split_filter_values(tag))
     if creator_id:
         where.append("t.creator_id = ?")
         params.append(creator_id)
@@ -332,14 +377,14 @@ def search_tasks(
         where.append("EXISTS (SELECT 1 FROM task_claims c WHERE c.task_id = t.id AND c.user_id = ? AND c.status = 'active')")
         params.append(claimer_id)
     if job_role:
-        where.append("LOWER(t.job_role) = LOWER(?)")
-        params.append(normalize_job_role(job_role))
+        _add_like_any(where, params, "t.job_role", split_filter_values(normalize_job_roles(job_role)))
     if dev_environment:
-        where.append("LOWER(t.dev_environment) LIKE LOWER(?)")
-        params.append(f"%{dev_environment.strip()}%")
+        _add_like_any(where, params, "t.dev_environment", split_filter_values(normalize_dev_environments(dev_environment)))
     if game_engine:
-        where.append("LOWER(t.game_engine) = LOWER(?)")
-        params.append(normalize_game_engine(game_engine))
+        engines = [normalize_game_engine(v) for v in split_filter_values(game_engine)]
+        _add_like_any(where, params, "t.game_engine", engines)
+    if task_type:
+        _add_like_any(where, params, "t.task_type", split_filter_values(normalize_task_types(task_type)))
     params.append(limit)
     query = f"SELECT t.* FROM tasks t WHERE {' AND '.join(where)} ORDER BY t.archived ASC, t.updated_at DESC LIMIT ?"
     with connect_db() as conn:
@@ -374,19 +419,19 @@ def list_user_projects(user_id: int, guild_id: int, limit: int = 10) -> list[dic
     return [dict(row) for row in rows]
 
 
-def upsert_profile(*, guild_id: int, user_id: int, display_name: str, bio: str, skills: str, portfolio_url: str, availability: str, preferred_roles: str, dev_environments: str, profile_image_url: str) -> dict:
+def upsert_profile(*, guild_id: int, user_id: int, display_name: str, bio: str, skills: str, portfolio_url: str, availability: str, preferred_roles: str, dev_environments: str, game_programs: str, profile_image_url: str) -> dict:
     timestamp = now_iso()
     with connect_db() as conn:
         conn.execute(
             """
-            INSERT INTO task_profiles (guild_id, user_id, display_name, bio, skills, portfolio_url, availability, preferred_roles, dev_environments, profile_image_url, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO task_profiles (guild_id, user_id, display_name, bio, skills, portfolio_url, availability, preferred_roles, dev_environments, game_programs, profile_image_url, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
                 display_name=excluded.display_name, bio=excluded.bio, skills=excluded.skills, portfolio_url=excluded.portfolio_url,
-                availability=excluded.availability, preferred_roles=excluded.preferred_roles, dev_environments=excluded.dev_environments,
+                availability=excluded.availability, preferred_roles=excluded.preferred_roles, dev_environments=excluded.dev_environments, game_programs=excluded.game_programs,
                 profile_image_url=excluded.profile_image_url, updated_at=excluded.updated_at
             """,
-            (guild_id, user_id, display_name.strip(), bio.strip(), clean_csv_tags(skills), portfolio_url.strip(), availability.strip(), clean_csv_tags(preferred_roles), normalize_dev_environments(dev_environments), profile_image_url.strip(), timestamp),
+            (guild_id, user_id, display_name.strip(), bio.strip(), clean_csv_tags(skills), portfolio_url.strip(), availability.strip(), clean_csv_tags(preferred_roles), normalize_dev_environments(dev_environments), normalize_game_programs(game_programs), profile_image_url.strip(), timestamp),
         )
         conn.commit()
     profile = get_profile(guild_id, user_id)
@@ -422,21 +467,21 @@ def mark_reminder_sent(task_id: int, reminder_type: str) -> None:
 def upsert_template(
     *, guild_id: int, owner_id: int, name: str, title: str, description: str, priority: str, due_date: str,
     tags: str, resource_links: str, thumbnail_url: str, positions_needed: int, job_role: str,
-    dev_environment: str, game_engine: str, custom_game_engine: str,
+    dev_environment: str, game_engine: str, custom_game_engine: str, game_programs: str = "", task_type: str = "Feature",
 ) -> dict:
     timestamp = now_iso()
     with connect_db() as conn:
         conn.execute(
             """
-            INSERT INTO task_templates (guild_id, owner_id, name, title, description, priority, due_date, tags, resource_links, thumbnail_url, positions_needed, job_role, dev_environment, game_engine, custom_game_engine, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO task_templates (guild_id, owner_id, name, title, description, priority, due_date, tags, task_type, resource_links, thumbnail_url, positions_needed, job_role, dev_environment, game_engine, custom_game_engine, game_programs, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, owner_id, name) DO UPDATE SET
                 title=excluded.title, description=excluded.description, priority=excluded.priority, due_date=excluded.due_date,
-                tags=excluded.tags, resource_links=excluded.resource_links, thumbnail_url=excluded.thumbnail_url,
+                tags=excluded.tags, task_type=excluded.task_type, resource_links=excluded.resource_links, thumbnail_url=excluded.thumbnail_url,
                 positions_needed=excluded.positions_needed, job_role=excluded.job_role, dev_environment=excluded.dev_environment,
-                game_engine=excluded.game_engine, custom_game_engine=excluded.custom_game_engine, updated_at=excluded.updated_at
+                game_engine=excluded.game_engine, custom_game_engine=excluded.custom_game_engine, game_programs=excluded.game_programs, updated_at=excluded.updated_at
             """,
-            (guild_id, owner_id, name.strip(), title.strip(), description.strip(), normalize_priority(priority), due_date, clean_csv_tags(tags), resource_links.strip(), thumbnail_url.strip(), max(1, int(positions_needed)), normalize_job_role(job_role), normalize_dev_environments(dev_environment), normalize_game_engine(game_engine), custom_game_engine.strip(), timestamp, timestamp),
+            (guild_id, owner_id, name.strip(), title.strip(), description.strip(), normalize_priority(priority), due_date, clean_csv_tags(tags), normalize_task_types(task_type), resource_links.strip(), thumbnail_url.strip(), max(1, int(positions_needed)), normalize_job_roles(job_role), normalize_dev_environments(dev_environment), normalize_game_engine(game_engine), custom_game_engine.strip(), normalize_game_programs(game_programs), timestamp, timestamp),
         )
         conn.commit()
     template = get_template(guild_id, owner_id, name)
@@ -461,3 +506,56 @@ def delete_template(guild_id: int, owner_id: int, name: str) -> bool:
         cur = conn.execute("DELETE FROM task_templates WHERE guild_id = ? AND owner_id = ? AND LOWER(name) = LOWER(?)", (guild_id, owner_id, name.strip()))
         conn.commit()
     return cur.rowcount > 0
+
+
+
+def set_config(guild_id: int, key: str, value: str) -> None:
+    with connect_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO bot_config (guild_id, key, value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value
+            """,
+            (guild_id, key, value),
+        )
+        conn.commit()
+
+
+def get_config(guild_id: int, key: str) -> str | None:
+    with connect_db() as conn:
+        row = conn.execute("SELECT value FROM bot_config WHERE guild_id = ? AND key = ?", (guild_id, key)).fetchone()
+    return str(row["value"]) if row else None
+
+
+def subscribe_user_to_role(guild_id: int, user_id: int, job_role: str) -> None:
+    role = normalize_job_role(job_role)
+    with connect_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO task_subscriptions (guild_id, user_id, job_role, created_at) VALUES (?, ?, ?, ?)",
+            (guild_id, user_id, role, now_iso()),
+        )
+        conn.commit()
+
+
+def unsubscribe_user_from_role(guild_id: int, user_id: int, job_role: str) -> None:
+    role = normalize_job_role(job_role)
+    with connect_db() as conn:
+        conn.execute("DELETE FROM task_subscriptions WHERE guild_id = ? AND user_id = ? AND job_role = ?", (guild_id, user_id, role))
+        conn.commit()
+
+
+def get_subscribers_for_task(task: dict) -> list[int]:
+    roles = [normalize_job_role(r) for r in str(task.get("job_role") or "").split(",") if r.strip()]
+    if not roles:
+        return []
+    placeholders = ", ".join("?" for _ in roles)
+    with connect_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT user_id FROM task_subscriptions
+            WHERE guild_id = ? AND job_role IN ({placeholders})
+            """,
+            [task["guild_id"], *roles],
+        ).fetchall()
+    return [int(row["user_id"]) for row in rows]

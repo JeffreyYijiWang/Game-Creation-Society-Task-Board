@@ -1,0 +1,31 @@
+services:
+  - type: worker
+    name: discord-kanban-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: TASK_FORUM_CHANNEL_ID
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: TASK_ASSIGNER_ROLE
+        value: task-assigner
+      - key: TASK_ADMIN_ROLE
+        value: task-admin
+      - key: MAX_ACTIVE_ASSIGNMENTS
+        value: "10"
+      - key: BOT_TIMEZONE
+        value: America/Chicago
+      - key: TASKBOT_DB
+        value: /var/data/taskbot.sqlite3
+      - key: COMMAND_CHANNEL_IDS
+        sync: false
+      - key: CLAIM_DISCUSSION_CHANNEL_ID
+        sync: false
+      - key: INFO_PAGE_CHANNEL_ID
+        sync: false
+      - key: WEBHOOK_BOARD_CHANNEL_IDS
+        sync: false

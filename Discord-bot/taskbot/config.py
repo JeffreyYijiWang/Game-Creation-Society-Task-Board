@@ -30,13 +30,17 @@ class Settings:
     guild_id: int = _int_env("GUILD_ID")
     db_path: str = os.getenv("TASKBOT_DB", "taskbot.sqlite3")
     task_assigner_role: str = os.getenv("TASK_ASSIGNER_ROLE", "task-assigner")
+    admin_role: str = os.getenv("TASK_ADMIN_ROLE", "task-admin")
     max_active_assignments: int = _int_env("MAX_ACTIVE_ASSIGNMENTS", 10)
     timezone_name: str = os.getenv("BOT_TIMEZONE", "America/Chicago")
     claim_discussion_channel_id: int = _int_env("CLAIM_DISCUSSION_CHANNEL_ID")
+    info_page_channel_id: int = _int_env("INFO_PAGE_CHANNEL_ID")
+    webhook_board_channel_ids: set[int] = None  # type: ignore[assignment]
     command_channel_ids: set[int] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command_channel_ids", _int_set_env("COMMAND_CHANNEL_IDS"))
+        object.__setattr__(self, "webhook_board_channel_ids", _int_set_env("WEBHOOK_BOARD_CHANNEL_IDS"))
 
     @property
     def timezone(self) -> ZoneInfo:

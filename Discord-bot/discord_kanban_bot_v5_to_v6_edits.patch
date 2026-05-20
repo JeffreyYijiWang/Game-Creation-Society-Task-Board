@@ -1,0 +1,349 @@
+diff --git a/taskbot/commands.py b/taskbot/commands.py
+index 4d26cb2..2a45afc 100644
+--- a/taskbot/commands.py
++++ b/taskbot/commands.py
+@@ -26,12 +26,12 @@ from taskbot.db import (
+     unsubscribe_user_from_role,
+     update_task,
+ )
+-from taskbot.embeds import command_help_embed, create_guidance_embed, dashboard_embed, info_page_embed, profile_embed, task_embed, template_embed
++from taskbot.embeds import command_help_embed, create_guidance_embed, dashboard_board_embed, info_page_embed, profile_embed, task_embed, template_embed
+ from taskbot.forum import fetch_task_thread, sync_discord_task
+ from taskbot.modals import ProfileEditModal, TaskCreateModal, TaskEditModal, TemplateSaveModal
+ from taskbot.notifications import notify_claim
+ from taskbot.utils import normalize_dev_environments, parse_due_date_to_iso
+-from taskbot.views import ProfileCardView, TaskCreateWizardView, TemplateDetailView, TemplateListView, template_list_content
++from taskbot.views import DashboardView, ProfileCardView, TaskCreateWizardView, TemplateDetailView, TemplateListView, template_list_content
+ 
+ 
+ async def command_channel_allowed(interaction: discord.Interaction) -> bool:
+@@ -350,15 +350,38 @@ async def task_search(
+     await interaction.response.send_message("\n\n".join(lines), ephemeral=True)
+ 
+ 
+-@task_group.command(name="dashboard", description="Task-assigner dashboard for tasks you created")
+-async def task_dashboard(interaction: discord.Interaction, include_archived: bool = True) -> None:
++@task_group.command(name="dashboard", description="Show your personal board and task-assigner dashboard")
++async def task_dashboard(interaction: discord.Interaction) -> None:
+     if not interaction.guild:
+         await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
+         return
+-    if not await require_task_assigner(interaction):
+-        return
+-    tasks = search_tasks(guild_id=interaction.guild.id, creator_id=interaction.user.id, include_archived=include_archived, limit=20)
+-    await interaction.response.send_message(embed=dashboard_embed(interaction.user, tasks, include_archived), ephemeral=True)
++
++    personal_tasks = search_tasks(
++        guild_id=interaction.guild.id,
++        claimer_id=interaction.user.id,
++        include_archived=True,
++        limit=50,
++    )
++    assigner_allowed = isinstance(interaction.user, discord.Member) and is_task_assigner(interaction.user)
++    assigner_tasks = search_tasks(
++        guild_id=interaction.guild.id,
++        creator_id=interaction.user.id,
++        include_archived=True,
++        limit=50,
++    ) if assigner_allowed else []
++
++    await interaction.response.send_message(
++        embed=dashboard_board_embed(
++            interaction.user,
++            personal_tasks,
++            assigner_tasks,
++            is_assigner_user=assigner_allowed,
++            mode="personal_horizontal",
++            show_closed=False,
++        ),
++        view=DashboardView(interaction.client, interaction.guild.id, interaction.user.id, assigner_allowed),  # type: ignore[arg-type]
++        ephemeral=True,
++    )
+ 
+ 
+ @task_group.command(name="profile", description="Show a bot-generated task profile card")
+diff --git a/taskbot/embeds.py b/taskbot/embeds.py
+index ec5d1e9..f744915 100644
+--- a/taskbot/embeds.py
++++ b/taskbot/embeds.py
+@@ -5,7 +5,7 @@ import discord
+ from taskbot.config import settings
+ from taskbot.constants import JOB_ROLE_EMOJIS, JOB_ROLES, STATUS_COLORS
+ from taskbot.db import count_task_claimers, get_attachments, get_claimers
+-from taskbot.utils import engine_label, format_user
++from taskbot.utils import engine_label, format_user, today_local
+ 
+ 
+ def task_embed(task: dict) -> discord.Embed:
+@@ -120,6 +120,144 @@ def dashboard_embed(user: discord.abc.User, tasks: list[dict], include_archived:
+     return embed
+ 
+ 
++def _short_task_line(task: dict) -> str:
++    thread = f"<#{task['thread_id']}>" if task.get("thread_id") else "No thread"
++    claimed = count_task_claimers(task["id"])
++    needed = int(task.get("positions_needed") or 1)
++    due = f" — due {task.get('due_date')}" if task.get("due_date") else ""
++    archived = " — archived" if task.get("archived") else ""
++    return (
++        f"**#{task['id']}** {thread} — {claimed}/{needed}{due}{archived}\n"
++        f"{str(task.get('title') or 'Untitled')[:90]}"
++    )
++
++
++def _is_late(task: dict) -> bool:
++    due_date = str(task.get("due_date") or "").strip()
++    if not due_date or task.get("archived") or task.get("status") in {"Done", "Archived"}:
++        return False
++    return due_date < today_local().isoformat()
++
++
++def _bucket_dashboard_tasks(tasks: list[dict], *, show_closed: bool) -> dict[str, list[dict]]:
++    buckets: dict[str, list[dict]] = {
++        "To Do": [],
++        "In Progress": [],
++        "Review": [],
++        "Late": [],
++        "Done": [],
++        "Archived": [],
++    }
++    for task in tasks:
++        status = str(task.get("status") or "To Do")
++        if task.get("archived") or status == "Archived":
++            if show_closed:
++                buckets["Archived"].append(task)
++            continue
++        if status == "Done":
++            if show_closed:
++                buckets["Done"].append(task)
++            continue
++        if _is_late(task):
++            buckets["Late"].append(task)
++        elif status in buckets:
++            buckets[status].append(task)
++        else:
++            buckets["To Do"].append(task)
++    return buckets
++
++
++def _field_value(tasks: list[dict], empty: str = "None") -> str:
++    if not tasks:
++        return empty
++    return "\n\n".join(_short_task_line(task) for task in tasks)[:1024]
++
++
++def _add_kanban_fields(embed: discord.Embed, tasks: list[dict], *, show_closed: bool, horizontal: bool) -> None:
++    buckets = _bucket_dashboard_tasks(tasks, show_closed=show_closed)
++    open_names = ["To Do", "In Progress", "Review", "Late"]
++    if horizontal:
++        for name in open_names:
++            embed.add_field(name=f"{name} ({len(buckets[name])})", value=_field_value(buckets[name]), inline=True)
++        if show_closed:
++            embed.add_field(name=f"Done ({len(buckets['Done'])})", value=_field_value(buckets["Done"]), inline=True)
++            embed.add_field(name=f"Archived ({len(buckets['Archived'])})", value=_field_value(buckets["Archived"]), inline=True)
++    else:
++        names = open_names + (["Done", "Archived"] if show_closed else [])
++        for name in names:
++            embed.add_field(name=f"{name} ({len(buckets[name])})", value=_field_value(buckets[name]), inline=False)
++
++
++def _add_assigner_list(embed: discord.Embed, tasks: list[dict], *, show_closed: bool) -> None:
++    visible: list[dict] = []
++    hidden = 0
++    for task in tasks:
++        is_closed = bool(task.get("archived")) or task.get("status") in {"Done", "Archived"}
++        if is_closed and not show_closed:
++            hidden += 1
++            continue
++        visible.append(task)
++
++    if not visible:
++        extra = f" {hidden} done/archived task(s) hidden." if hidden else ""
++        embed.add_field(name="Created Tasks", value=f"No matching visible tasks.{extra}", inline=False)
++        return
++
++    lines = []
++    for task in visible[:25]:
++        claimed = count_task_claimers(task["id"])
++        needed = int(task.get("positions_needed") or 1)
++        fill = "FULL" if claimed >= needed else "OPEN"
++        lines.append(
++            f"**#{task['id']}** <#{task['thread_id']}> — **{task.get('status')}** — {fill} {claimed}/{needed} — {task.get('job_role')}\n"
++            f"{task.get('title') or 'Untitled'}"
++        )
++    if hidden:
++        lines.append(f"*{hidden} done/archived task(s) hidden. Press **Show Done + Archived** to reveal them.*")
++    embed.add_field(name="Created Tasks", value="\n\n".join(lines)[:4096], inline=False)
++
++
++def dashboard_board_embed(
++    user: discord.abc.User,
++    personal_tasks: list[dict],
++    assigner_tasks: list[dict],
++    *,
++    is_assigner_user: bool,
++    mode: str = "personal_horizontal",
++    show_closed: bool = False,
++) -> discord.Embed:
++    mode_titles = {
++        "personal_horizontal": "Personal Task Board — horizontal",
++        "personal_vertical": "Personal Task Board — vertical",
++        "assigner_list": "Task-assigner Dashboard — list",
++        "assigner_horizontal": "Task-assigner Kanban — horizontal",
++        "assigner_vertical": "Task-assigner Kanban — vertical",
++    }
++    embed = discord.Embed(
++        title=f"{mode_titles.get(mode, 'Task Dashboard')} for {user.display_name}",
++        description=(
++            "Open columns show active work. Late means the due date has passed and the task is not done/archived. "
++            "Done and archived tasks stay hidden until you press **Show Done + Archived**."
++        ),
++        color=discord.Color.gold() if mode.startswith("assigner") else discord.Color.blurple(),
++    )
++
++    if mode.startswith("assigner"):
++        if not is_assigner_user:
++            embed.add_field(name="Task-assigner access", value="You do not have task-assigner access, so only the personal board is available.", inline=False)
++            _add_kanban_fields(embed, personal_tasks, show_closed=show_closed, horizontal=True)
++            return embed
++        if mode == "assigner_list":
++            _add_assigner_list(embed, assigner_tasks, show_closed=show_closed)
++        else:
++            _add_kanban_fields(embed, assigner_tasks, show_closed=show_closed, horizontal=(mode == "assigner_horizontal"))
++    else:
++        _add_kanban_fields(embed, personal_tasks, show_closed=show_closed, horizontal=(mode == "personal_horizontal"))
++
++    embed.set_footer(text="Use the buttons below to switch personal/assigner, horizontal/vertical, and closed-task visibility.")
++    return embed
++
++
+ def command_help_embed() -> discord.Embed:
+     embed = discord.Embed(
+         title="Discord Kanban / Recruitment Bot Commands",
+diff --git a/taskbot/views.py b/taskbot/views.py
+index ec42ab6..616e5bd 100644
+--- a/taskbot/views.py
++++ b/taskbot/views.py
+@@ -17,10 +17,11 @@ from taskbot.db import (
+     get_task_by_thread,
+     list_templates,
+     list_user_projects,
++    search_tasks,
+     update_task,
+ )
+ from taskbot.forum import sync_discord_task
+-from taskbot.embeds import create_guidance_embed, profile_embed, template_embed
++from taskbot.embeds import create_guidance_embed, dashboard_board_embed, profile_embed, template_embed
+ 
+ 
+ class TaskControls(discord.ui.View):
+@@ -266,6 +267,109 @@ class GameEngineSelect(discord.ui.Select):
+         await interaction.response.defer(ephemeral=True)
+ 
+ 
++class DashboardView(discord.ui.View):
++    def __init__(
++        self,
++        bot: commands.Bot,
++        guild_id: int,
++        user_id: int,
++        assigner_allowed: bool,
++        *,
++        mode: str = "personal_horizontal",
++        show_closed: bool = False,
++    ) -> None:
++        super().__init__(timeout=900)
++        self.bot = bot
++        self.guild_id = guild_id
++        self.user_id = user_id
++        self.assigner_allowed = assigner_allowed
++        self.mode = mode
++        self.show_closed = show_closed
++        self._refresh_button_labels()
++
++    def _refresh_button_labels(self) -> None:
++        for child in self.children:
++            if isinstance(child, discord.ui.Button) and child.custom_id == "taskbot:dashboard_toggle_closed":
++                child.label = "Hide Done + Archived" if self.show_closed else "Show Done + Archived"
++
++    async def interaction_check(self, interaction: discord.Interaction) -> bool:
++        if interaction.user.id != self.user_id:
++            await interaction.response.send_message("Only the dashboard owner can use these buttons.", ephemeral=True)
++            return False
++        return True
++
++    def _tasks(self) -> tuple[list[dict], list[dict]]:
++        personal_tasks = search_tasks(
++            guild_id=self.guild_id,
++            claimer_id=self.user_id,
++            include_archived=True,
++            limit=50,
++        )
++        assigner_tasks = search_tasks(
++            guild_id=self.guild_id,
++            creator_id=self.user_id,
++            include_archived=True,
++            limit=50,
++        ) if self.assigner_allowed else []
++        return personal_tasks, assigner_tasks
++
++    async def _render(self, interaction: discord.Interaction, *, mode: str | None = None, show_closed: bool | None = None) -> None:
++        next_mode = mode or self.mode
++        next_show_closed = self.show_closed if show_closed is None else show_closed
++        personal_tasks, assigner_tasks = self._tasks()
++        await interaction.response.edit_message(
++            embed=dashboard_board_embed(
++                interaction.user,
++                personal_tasks,
++                assigner_tasks,
++                is_assigner_user=self.assigner_allowed,
++                mode=next_mode,
++                show_closed=next_show_closed,
++            ),
++            view=DashboardView(
++                self.bot,
++                self.guild_id,
++                self.user_id,
++                self.assigner_allowed,
++                mode=next_mode,
++                show_closed=next_show_closed,
++            ),
++        )
++
++    @discord.ui.button(label="Personal Board", style=discord.ButtonStyle.primary, row=0)
++    async def personal_horizontal(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
++        await self._render(interaction, mode="personal_horizontal")
++
++    @discord.ui.button(label="Personal Vertical", style=discord.ButtonStyle.secondary, row=0)
++    async def personal_vertical(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
++        await self._render(interaction, mode="personal_vertical")
++
++    @discord.ui.button(label="Assigner List", style=discord.ButtonStyle.secondary, row=1)
++    async def assigner_list(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
++        if not self.assigner_allowed:
++            await interaction.response.send_message("You need task-assigner/admin access to view the assigner dashboard.", ephemeral=True)
++            return
++        await self._render(interaction, mode="assigner_list")
++
++    @discord.ui.button(label="Assigner Kanban", style=discord.ButtonStyle.secondary, row=1)
++    async def assigner_horizontal(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
++        if not self.assigner_allowed:
++            await interaction.response.send_message("You need task-assigner/admin access to view the assigner dashboard.", ephemeral=True)
++            return
++        await self._render(interaction, mode="assigner_horizontal")
++
++    @discord.ui.button(label="Assigner Vertical", style=discord.ButtonStyle.secondary, row=1)
++    async def assigner_vertical(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
++        if not self.assigner_allowed:
++            await interaction.response.send_message("You need task-assigner/admin access to view the assigner dashboard.", ephemeral=True)
++            return
++        await self._render(interaction, mode="assigner_vertical")
++
++    @discord.ui.button(label="Show Done + Archived", style=discord.ButtonStyle.success, row=2, custom_id="taskbot:dashboard_toggle_closed")
++    async def toggle_closed(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
++        await self._render(interaction, show_closed=not self.show_closed)
++
++
+ class ProfileCardView(discord.ui.View):
+     def __init__(self, user_id: int, guild_id: int) -> None:
+         super().__init__(timeout=900)

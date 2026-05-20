@@ -6,8 +6,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from taskbot.access import can_manage_task, is_admin_member, is_task_assigner
 from taskbot.config import settings
-from taskbot.constants import DEV_ENVIRONMENTS, GAME_ENGINES, JOB_ROLES, POSITIONS_NEEDED_CHOICES, PRIORITY_CHOICES, STATUS_CHOICES
+from taskbot.constants import GAME_ENGINES, JOB_ROLE_EMOJIS, JOB_ROLES, POSITIONS_NEEDED_CHOICES, PRIORITY_CHOICES, STATUS_CHOICES
 from taskbot.db import (
     add_attachment,
     claim_task,
@@ -16,17 +17,21 @@ from taskbot.db import (
     get_profile,
     get_profile_stats,
     get_task,
+    get_config,
     get_template,
     list_templates,
     search_tasks,
+    set_config,
+    subscribe_user_to_role,
+    unsubscribe_user_from_role,
     update_task,
 )
-from taskbot.embeds import command_help_embed, dashboard_embed, profile_embed, task_embed, template_embed
+from taskbot.embeds import command_help_embed, create_guidance_embed, dashboard_board_embed, info_page_embed, profile_embed, task_embed, template_embed
 from taskbot.forum import fetch_task_thread, sync_discord_task
-from taskbot.modals import ProfileEditModal, TaskCreateModal, TemplateSaveModal
+from taskbot.modals import ProfileEditModal, TaskCreateModal, TaskEditModal, TemplateSaveModal
 from taskbot.notifications import notify_claim
 from taskbot.utils import normalize_dev_environments, parse_due_date_to_iso
-from taskbot.views import ProfileCardView, TaskCreateWizardView, TemplateDetailView
+from taskbot.views import DashboardView, ProfileCardView, TaskCreateWizardView, TemplateDetailView, TemplateListView, template_list_content
 
 
 async def command_channel_allowed(interaction: discord.Interaction) -> bool:
@@ -53,16 +58,26 @@ def setup_commands(bot: commands.Bot) -> None:
 
 
 def member_has_task_assigner_role(member: discord.Member) -> bool:
-    return any(role.name == settings.task_assigner_role for role in member.roles)
+    return is_task_assigner(member)
 
 
 async def require_task_assigner(interaction: discord.Interaction) -> bool:
     if not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
         return False
-    if member_has_task_assigner_role(interaction.user) or interaction.user.guild_permissions.manage_guild:
+    if is_task_assigner(interaction.user):
         return True
-    await interaction.response.send_message(f"You need the `{settings.task_assigner_role}` role to use this command.", ephemeral=True)
+    await interaction.response.send_message(f"You need the `{settings.task_assigner_role}` role or `{settings.admin_role}` role to use this command.", ephemeral=True)
+    return False
+
+
+async def require_task_manager(interaction: discord.Interaction, task: dict) -> bool:
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
+        return False
+    if can_manage_task(interaction.user, task):
+        return True
+    await interaction.response.send_message("Only admins or the task assigner who created this task can edit it.", ephemeral=True)
     return False
 
 
@@ -75,13 +90,71 @@ async def task_help(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=command_help_embed(), ephemeral=True)
 
 
+@task_group.command(name="info_page", description="Post or refresh the public task-board instruction page")
+async def task_info_page(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None) -> None:
+    if not interaction.guild:
+        await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
+        return
+    if not isinstance(interaction.user, discord.Member) or not is_admin_member(interaction.user):
+        await interaction.response.send_message("Only task admins can publish the info page.", ephemeral=True)
+        return
+    target_channel = channel
+    if target_channel is None and settings.info_page_channel_id:
+        fetched = interaction.client.get_channel(settings.info_page_channel_id) or await interaction.client.fetch_channel(settings.info_page_channel_id)
+        target_channel = fetched if isinstance(fetched, discord.TextChannel) else None
+    if target_channel is None and isinstance(interaction.channel, discord.TextChannel):
+        target_channel = interaction.channel
+    if not isinstance(target_channel, discord.TextChannel):
+        await interaction.response.send_message("Pick a public text channel, set INFO_PAGE_CHANNEL_ID, or run this command inside a text channel.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    message = await target_channel.send(embed=info_page_embed())
+    for role in JOB_ROLES:
+        emoji = JOB_ROLE_EMOJIS.get(role)
+        if emoji:
+            await message.add_reaction(emoji)
+    set_config(interaction.guild.id, "info_page_message_id", str(message.id))
+    await interaction.followup.send(f"Posted the public info page in {target_channel.mention}.", ephemeral=True)
+
+
+@task_group.command(name="webhook_publish", description="Mirror a task to configured board channels using webhooks")
+async def task_webhook_publish(interaction: discord.Interaction, task_id: int) -> None:
+    if not interaction.guild:
+        await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
+        return
+    task = get_task(task_id)
+    if not task:
+        await interaction.response.send_message("Task not found.", ephemeral=True)
+        return
+    if not await require_task_manager(interaction, task):
+        return
+    if not settings.webhook_board_channel_ids:
+        await interaction.response.send_message("Set WEBHOOK_BOARD_CHANNEL_IDS in your environment first.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    sent = 0
+    for channel_id in settings.webhook_board_channel_ids:
+        channel = interaction.client.get_channel(channel_id) or await interaction.client.fetch_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            continue
+        hooks = await channel.webhooks()
+        hook = next((h for h in hooks if h.name == "Task Board Mirror"), None)
+        if hook is None:
+            hook = await channel.create_webhook(name="Task Board Mirror")
+        await hook.send(embed=task_embed(task), username="Task Board", wait=True)
+        sent += 1
+    await interaction.followup.send(f"Published task #{task_id} to {sent} webhook board channel(s).", ephemeral=True)
+
+
 @task_group.command(name="create", description="Open the guided task creator with dropdowns and optional thumbnail")
 async def task_create(interaction: discord.Interaction, thumbnail: Optional[discord.Attachment] = None, custom_game_engine: Optional[str] = None) -> None:
     if thumbnail and thumbnail.content_type and not thumbnail.content_type.startswith("image/"):
         await interaction.response.send_message("The thumbnail must be an image attachment.", ephemeral=True)
         return
+    if not await require_task_assigner(interaction):
+        return
     await interaction.response.send_message(
-        "Choose the major dividers below, including one or more development environments. Then press **Continue to form**.",
+        embed=create_guidance_embed(stage="main"),
         ephemeral=True,
         view=TaskCreateWizardView(interaction.client, interaction.user.id, thumbnail.url if thumbnail else "", custom_game_engine or ""),  # type: ignore[arg-type]
     )
@@ -129,6 +202,9 @@ async def task_claim(interaction: discord.Interaction, task_id: int) -> None:
     if active_count >= settings.max_active_assignments:
         await interaction.response.send_message(f"You already have {active_count} active assignments. The limit is {settings.max_active_assignments}.", ephemeral=True)
         return
+    if not get_profile(interaction.guild.id, interaction.user.id):
+        await interaction.response.send_modal(ProfileEditModal(guild_id=interaction.guild.id, user_id=interaction.user.id))
+        return
     await interaction.response.defer(ephemeral=True)
     ok, message, updated = claim_task(task_id, interaction.user.id)
     if not ok:
@@ -148,6 +224,11 @@ async def task_assign(interaction: discord.Interaction, task_id: int, user: disc
     task = get_task(task_id)
     if not task:
         await interaction.response.send_message("Task not found.", ephemeral=True)
+        return
+    if not await require_task_manager(interaction, task):
+        return
+    if not get_profile(interaction.guild.id, user.id):
+        await interaction.response.send_message(f"{user.mention} has not completed a task profile yet.", ephemeral=True)
         return
     active_count = count_active_assignments(user.id, interaction.guild.id)
     if active_count >= settings.max_active_assignments:
@@ -171,6 +252,8 @@ async def task_move(interaction: discord.Interaction, task_id: int, status: app_
     if not task:
         await interaction.response.send_message("Task not found.", ephemeral=True)
         return
+    if not await require_task_manager(interaction, task):
+        return
     await interaction.response.defer(ephemeral=True)
     updated = update_task(task_id, interaction.user.id, "status_changed", status=status.value, archived=0)
     if updated:
@@ -183,6 +266,8 @@ async def task_done(interaction: discord.Interaction, task_id: int) -> None:
     task = get_task(task_id)
     if not task:
         await interaction.response.send_message("Task not found.", ephemeral=True)
+        return
+    if not await require_task_manager(interaction, task):
         return
     await interaction.response.defer(ephemeral=True)
     updated = update_task(task_id, interaction.user.id, "done", status="Done", archived=0)
@@ -197,6 +282,8 @@ async def task_archive(interaction: discord.Interaction, task_id: int) -> None:
     if not task:
         await interaction.response.send_message("Task not found.", ephemeral=True)
         return
+    if not await require_task_manager(interaction, task):
+        return
     await interaction.response.defer(ephemeral=True)
     updated = update_task(task_id, interaction.user.id, "archived", status="Archived", archived=1)
     if updated:
@@ -210,6 +297,8 @@ async def task_restore(interaction: discord.Interaction, task_id: int) -> None:
     if not task:
         await interaction.response.send_message("Task not found.", ephemeral=True)
         return
+    if not await require_task_manager(interaction, task):
+        return
     await interaction.response.defer(ephemeral=True)
     updated = update_task(task_id, interaction.user.id, "restored", status="To Do", archived=0)
     if updated:
@@ -221,20 +310,17 @@ async def task_restore(interaction: discord.Interaction, task_id: int) -> None:
 @app_commands.choices(
     status=[app_commands.Choice(name=s, value=s) for s in STATUS_CHOICES],
     priority=[app_commands.Choice(name=p, value=p) for p in PRIORITY_CHOICES],
-    job_role=[app_commands.Choice(name=x, value=x) for x in JOB_ROLES],
-    dev_environment=[app_commands.Choice(name=x, value=x) for x in DEV_ENVIRONMENTS],
-    game_engine=[app_commands.Choice(name=x, value=x) for x in GAME_ENGINES],
 )
 async def task_search(
     interaction: discord.Interaction,
     status: Optional[app_commands.Choice[str]] = None,
     priority: Optional[app_commands.Choice[str]] = None,
+    task_types: Optional[str] = None,
+    job_roles: Optional[str] = None,
+    dev_environments: Optional[str] = None,
+    game_engines: Optional[str] = None,
     tag: Optional[str] = None,
-    claimer: Optional[discord.Member] = None,
     creator: Optional[discord.Member] = None,
-    job_role: Optional[app_commands.Choice[str]] = None,
-    dev_environment: Optional[app_commands.Choice[str]] = None,
-    game_engine: Optional[app_commands.Choice[str]] = None,
     include_archived: bool = False,
 ) -> None:
     if not interaction.guild:
@@ -245,34 +331,57 @@ async def task_search(
         status=status.value if status else None,
         priority=priority.value if priority else None,
         tag=tag,
-        claimer_id=claimer.id if claimer else None,
         creator_id=creator.id if creator else None,
-        job_role=job_role.value if job_role else None,
-        dev_environment=dev_environment.value if dev_environment else None,
-        game_engine=game_engine.value if game_engine else None,
+        job_role=job_roles,
+        dev_environment=dev_environments,
+        game_engine=game_engines,
+        task_type=task_types,
         include_archived=include_archived,
         limit=10,
     )
     if not results:
-        await interaction.response.send_message("No matching tasks found.", ephemeral=True)
+        await interaction.response.send_message("No matching tasks found. For multi-answer fields, separate values with commas, for example `Programmer, UI Artist`.", ephemeral=True)
         return
     lines = []
     for task in results:
         thread = f"<#{task['thread_id']}>" if task.get("thread_id") else "No thread"
         archived = " — archived" if task.get("archived") else ""
-        lines.append(f"**#{task['id']}** {thread} — **{task['status']}** — {task.get('job_role')} — {task.get('dev_environment')} — {task.get('game_engine')}{archived}\n{task['title']}")
+        lines.append(f"**#{task['id']}** {thread} — **{task['status']}** — {task.get('task_type') or 'Feature'} — {task.get('job_role')} — {task.get('dev_environment')} — {task.get('game_engine')}{archived}\n{task['title']}")
     await interaction.response.send_message("\n\n".join(lines), ephemeral=True)
 
 
-@task_group.command(name="dashboard", description="Task-assigner dashboard for tasks you created")
-async def task_dashboard(interaction: discord.Interaction, include_archived: bool = True) -> None:
+@task_group.command(name="dashboard", description="Show your personal board and task-assigner dashboard")
+async def task_dashboard(interaction: discord.Interaction) -> None:
     if not interaction.guild:
         await interaction.response.send_message("This command only works inside a server.", ephemeral=True)
         return
-    if not await require_task_assigner(interaction):
-        return
-    tasks = search_tasks(guild_id=interaction.guild.id, creator_id=interaction.user.id, include_archived=include_archived, limit=20)
-    await interaction.response.send_message(embed=dashboard_embed(interaction.user, tasks, include_archived), ephemeral=True)
+
+    personal_tasks = search_tasks(
+        guild_id=interaction.guild.id,
+        claimer_id=interaction.user.id,
+        include_archived=True,
+        limit=50,
+    )
+    assigner_allowed = isinstance(interaction.user, discord.Member) and is_task_assigner(interaction.user)
+    assigner_tasks = search_tasks(
+        guild_id=interaction.guild.id,
+        creator_id=interaction.user.id,
+        include_archived=True,
+        limit=50,
+    ) if assigner_allowed else []
+
+    await interaction.response.send_message(
+        embed=dashboard_board_embed(
+            interaction.user,
+            personal_tasks,
+            assigner_tasks,
+            is_assigner_user=assigner_allowed,
+            mode="personal_horizontal",
+            show_closed=False,
+        ),
+        view=DashboardView(interaction.client, interaction.guild.id, interaction.user.id, assigner_allowed),  # type: ignore[arg-type]
+        ephemeral=True,
+    )
 
 
 @task_group.command(name="profile", description="Show a bot-generated task profile card")
@@ -322,6 +431,40 @@ async def task_send_profile(interaction: discord.Interaction, task_id: int) -> N
     await interaction.followup.send("Profile card sent." if ok else "Could not send the profile card; the assigner may have DMs disabled and there is no task thread available.", ephemeral=True)
 
 
+@task_group.command(name="edit", description="Edit an existing task you created")
+async def task_edit(interaction: discord.Interaction, task_id: int, thumbnail: Optional[discord.Attachment] = None) -> None:
+    task = get_task(task_id)
+    if not task:
+        await interaction.response.send_message("Task not found.", ephemeral=True)
+        return
+    if thumbnail and thumbnail.content_type and not thumbnail.content_type.startswith("image/"):
+        await interaction.response.send_message("The replacement thumbnail must be an image attachment.", ephemeral=True)
+        return
+    if not await require_task_manager(interaction, task):
+        return
+    await interaction.response.send_modal(TaskEditModal(interaction.client, task, thumbnail_url=thumbnail.url if thumbnail else ""))  # type: ignore[arg-type]
+
+
+@task_edit.autocomplete("task_id")
+async def task_edit_task_id_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        return []
+    creator_id = None if is_admin_member(interaction.user) else interaction.user.id
+    tasks = search_tasks(guild_id=interaction.guild.id, creator_id=creator_id, include_archived=True, limit=25)
+    choices: list[app_commands.Choice[int]] = []
+    needle = current.strip().lower()
+    for task in tasks:
+        haystack = f"{task['id']} {task.get('title', '')} {task.get('status', '')}".lower()
+        if needle and needle not in haystack:
+            continue
+        bucket = "ARCHIVED" if task.get("archived") else "ACTIVE"
+        name = f"{bucket} #{task['id']} — {task.get('title', 'Untitled')}"[:100]
+        choices.append(app_commands.Choice(name=name, value=int(task["id"])))
+        if len(choices) >= 25:
+            break
+    return choices
+
+
 @task_group.command(name="info", description="Show one task by ID")
 async def task_info(interaction: discord.Interaction, task_id: int) -> None:
     task = get_task(task_id)
@@ -336,6 +479,8 @@ async def task_set_due(interaction: discord.Interaction, task_id: int, due_date:
     task = get_task(task_id)
     if not task:
         await interaction.response.send_message("Task not found.", ephemeral=True)
+        return
+    if not await require_task_manager(interaction, task):
         return
     try:
         parsed = parse_due_date_to_iso(due_date)
@@ -352,21 +497,24 @@ async def task_set_due(interaction: discord.Interaction, task_id: int, due_date:
 @template_group.command(name="save", description="Save a reusable task template")
 @app_commands.choices(
     positions_needed=[app_commands.Choice(name=str(n), value=n) for n in POSITIONS_NEEDED_CHOICES],
-    job_role=[app_commands.Choice(name=x, value=x) for x in JOB_ROLES],
     game_engine=[app_commands.Choice(name=x, value=x) for x in GAME_ENGINES],
 )
 async def template_save(
     interaction: discord.Interaction,
     name: str,
     positions_needed: app_commands.Choice[int],
-    job_role: app_commands.Choice[str],
     game_engine: app_commands.Choice[str],
+    job_roles: str = "Programmer",
     dev_environments: str = "Windows",
     custom_game_engine: Optional[str] = None,
+    game_programs: Optional[str] = None,
+    task_types: str = "Feature",
     thumbnail: Optional[discord.Attachment] = None,
 ) -> None:
     if not interaction.guild:
         await interaction.response.send_message("Templates only work inside a server.", ephemeral=True)
+        return
+    if not await require_task_assigner(interaction):
         return
     await interaction.response.send_modal(TemplateSaveModal(
         guild_id=interaction.guild.id,
@@ -374,31 +522,36 @@ async def template_save(
         name=name,
         thumbnail_url=thumbnail.url if thumbnail else "",
         positions_needed=positions_needed.value,
-        job_role=job_role.value,
+        job_role=job_roles,
         dev_environment=normalize_dev_environments(dev_environments),
         game_engine=game_engine.value,
         custom_game_engine=custom_game_engine or "",
+        game_programs=game_programs or "",
+        task_type=task_types,
     ))
 
 
 @template_group.command(name="edit", description="Edit an existing template")
 @app_commands.choices(
     positions_needed=[app_commands.Choice(name=str(n), value=n) for n in POSITIONS_NEEDED_CHOICES],
-    job_role=[app_commands.Choice(name=x, value=x) for x in JOB_ROLES],
     game_engine=[app_commands.Choice(name=x, value=x) for x in GAME_ENGINES],
 )
 async def template_edit(
     interaction: discord.Interaction,
     name: str,
     positions_needed: app_commands.Choice[int],
-    job_role: app_commands.Choice[str],
     game_engine: app_commands.Choice[str],
+    job_roles: str = "Programmer",
     dev_environments: str = "Windows",
     custom_game_engine: Optional[str] = None,
+    game_programs: Optional[str] = None,
+    task_types: str = "Feature",
     thumbnail: Optional[discord.Attachment] = None,
 ) -> None:
     if not interaction.guild:
         await interaction.response.send_message("Templates only work inside a server.", ephemeral=True)
+        return
+    if not await require_task_assigner(interaction):
         return
     existing = get_template(interaction.guild.id, interaction.user.id, name)
     if not existing:
@@ -410,10 +563,12 @@ async def template_edit(
         name=name,
         thumbnail_url=thumbnail.url if thumbnail else existing.get("thumbnail_url", ""),
         positions_needed=positions_needed.value,
-        job_role=job_role.value,
-        dev_environment=normalize_dev_environments(dev_environments),
+        job_role=job_roles or existing.get("job_role", "Programmer"),
+        dev_environment=normalize_dev_environments(dev_environments or existing.get("dev_environment", "Windows")),
         game_engine=game_engine.value,
         custom_game_engine=custom_game_engine or existing.get("custom_game_engine", ""),
+        game_programs=game_programs or existing.get("game_programs", ""),
+        task_type=task_types or existing.get("task_type", "Feature"),
         existing=existing,
     ))
 
@@ -430,7 +585,7 @@ async def template_use(interaction: discord.Interaction, name: str, thumbnail: O
     if thumbnail:
         template = dict(template)
         template["thumbnail_url"] = thumbnail.url
-    await interaction.response.send_message("Template loaded. Adjust dropdowns if needed, then press **Continue to form**.", ephemeral=True, view=TaskCreateWizardView(interaction.client, interaction.user.id, custom_game_engine=custom_game_engine or template.get("custom_game_engine", ""), template=template))  # type: ignore[arg-type]
+    await interaction.response.send_message(embed=create_guidance_embed(stage="main"), ephemeral=True, view=TaskCreateWizardView(interaction.client, interaction.user.id, custom_game_engine=custom_game_engine or template.get("custom_game_engine", ""), template=template))  # type: ignore[arg-type]
 
 
 @template_group.command(name="view", description="Display one saved template as an editable Discord module")
@@ -454,8 +609,7 @@ async def template_list(interaction: discord.Interaction) -> None:
     if not templates:
         await interaction.response.send_message("You have no templates yet.", ephemeral=True)
         return
-    lines = [f"`{t['name']}` — {t.get('job_role')} — {t.get('game_engine')} — {t.get('positions_needed')} needed — {t.get('dev_environment')}\n{t.get('title') or 'Untitled'}" for t in templates[:20]]
-    await interaction.response.send_message("\n\n".join(lines), ephemeral=True)
+    await interaction.response.send_message(template_list_content(templates), view=TemplateListView(interaction.client, interaction.guild.id, interaction.user.id, templates), ephemeral=True)  # type: ignore[arg-type]
 
 
 @template_group.command(name="delete", description="Delete one of your templates")

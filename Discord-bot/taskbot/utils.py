@@ -7,7 +7,7 @@ import discord
 from dateutil import parser as date_parser
 
 from taskbot.config import settings
-from taskbot.constants import DEV_ENVIRONMENTS, GAME_ENGINES, JOB_ROLES, PRIORITY_CHOICES, STATUS_CHOICES
+from taskbot.constants import DEV_ENVIRONMENTS, GAME_ENGINES, GAME_PROGRAMS, JOB_ROLES, PRIORITY_CHOICES, STATUS_CHOICES, TASK_TYPES
 
 
 def now_iso() -> str:
@@ -61,6 +61,21 @@ def normalize_job_role(job_role: str | None) -> str:
     return normalize_choice(job_role, JOB_ROLES, "Programmer")
 
 
+def normalize_job_roles(raw: str | list[str] | tuple[str, ...] | None) -> str:
+    """Normalize one or more job roles into a comma-separated value."""
+    if raw is None:
+        return "Programmer"
+    parts = list(raw) if isinstance(raw, (list, tuple)) else [p.strip() for p in str(raw).split(",")]
+    selected: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        for role in JOB_ROLES:
+            if str(part).strip().lower() == role.lower() and role.lower() not in seen:
+                seen.add(role.lower())
+                selected.append(role)
+    return ", ".join(selected) if selected else "Programmer"
+
+
 def normalize_dev_environment(env: str | None) -> str:
     return normalize_choice(env, DEV_ENVIRONMENTS, "Windows")
 
@@ -82,6 +97,52 @@ def normalize_dev_environments(raw: str | list[str] | tuple[str, ...] | None) ->
 
 def normalize_game_engine(engine: str | None) -> str:
     return normalize_choice(engine, GAME_ENGINES, "Other")
+
+
+def normalize_task_type(task_type: str | None) -> str:
+    return normalize_choice(task_type, TASK_TYPES, "Feature")
+
+
+def normalize_task_types(raw: str | list[str] | tuple[str, ...] | None) -> str:
+    """Normalize one or more task-type dividers into a comma-separated value."""
+    if raw is None:
+        return "Feature"
+    parts = list(raw) if isinstance(raw, (list, tuple)) else [p.strip() for p in str(raw).split(",")]
+    selected: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        for task_type in TASK_TYPES:
+            if str(part).strip().lower() == task_type.lower() and task_type.lower() not in seen:
+                seen.add(task_type.lower())
+                selected.append(task_type)
+    return ", ".join(selected) if selected else "Feature"
+
+
+def split_filter_values(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in str(raw).replace(";", ",").split(",") if part.strip()]
+
+
+def normalize_game_programs(raw: str | list[str] | tuple[str, ...] | None) -> str:
+    """Normalize one or more software/program familiarity tags."""
+    if raw is None:
+        return ""
+    parts = list(raw) if isinstance(raw, (list, tuple)) else [p.strip() for p in str(raw).split(",")]
+    selected: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        for program in GAME_PROGRAMS:
+            if str(part).strip().lower() == program.lower() and program.lower() not in seen:
+                seen.add(program.lower())
+                selected.append(program)
+    # Keep custom entries too, because tool familiarity can be wider than the preset list.
+    for part in parts:
+        cleaned = str(part).strip()
+        if cleaned and cleaned.lower() not in seen:
+            seen.add(cleaned.lower())
+            selected.append(cleaned)
+    return ", ".join(selected)
 
 
 def parse_due_date_to_iso(raw: str | None) -> str:

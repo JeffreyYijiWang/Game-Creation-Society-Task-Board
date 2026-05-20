@@ -82,3 +82,23 @@ async def send_due_reminder(bot: commands.Bot, task: dict) -> None:
     if thread:
         mentions = " ".join(user.mention for user in users)
         await thread.send(f"{mentions} {message}")
+
+
+async def notify_new_task_subscribers(bot: commands.Bot, task: dict) -> None:
+    """DM users who subscribed to one of this task's job roles via the info-page reactions."""
+    from taskbot.constants import JOB_ROLE_EMOJIS
+    from taskbot.db import get_subscribers_for_task
+
+    thread = await fetch_task_thread(bot, task.get("thread_id"))
+    task_link = thread.mention if thread else f"Task #{task['id']}"
+    roles = [r.strip() for r in str(task.get("job_role") or "").split(",") if r.strip()]
+    role_text = ", ".join(f"{JOB_ROLE_EMOJIS.get(role, '')} {role}" for role in roles) or "matching role"
+    message = f"New task for {role_text}: **#{task['id']} — {task['title']}**\nOpen: {task_link}"
+    for user_id in get_subscribers_for_task(task):
+        if int(user_id) == int(task.get("creator_id") or 0):
+            continue
+        try:
+            user = await bot.fetch_user(int(user_id))
+        except discord.HTTPException:
+            continue
+        await safe_dm(user, message)

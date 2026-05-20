@@ -13,16 +13,20 @@ def task_thread_title(task: dict) -> str:
     claimed = count_task_claimers(task["id"])
     needed = int(task.get("positions_needed") or 1)
     filled = "[FILLED] " if claimed >= needed else ""
-    return f"{archive_prefix}{filled}#{task['id']} [{task.get('job_role')}] {task['title']}"[:100]
+    roles = task.get("job_role") or "Role"
+    return f"{archive_prefix}{filled}#{task['id']} [{roles}] {task['title']}"[:100]
 
 
 def matching_forum_tags(forum: discord.ForumChannel, task: dict) -> list[discord.ForumTag]:
     claimed = count_task_claimers(task["id"])
     needed = int(task.get("positions_needed") or 1)
     environments = [x.strip() for x in str(task.get("dev_environment") or "").split(",") if x.strip()]
+    roles = [x.strip() for x in str(task.get("job_role") or "").split(",") if x.strip()]
+    task_types = [x.strip() for x in str(task.get("task_type") or "").split(",") if x.strip()]
     wanted_names = [
         "Filled" if claimed >= needed else task["status"],
-        task.get("job_role") or "",
+        *task_types,
+        *roles,
         f"Need {needed}",
         *environments,
         task.get("game_engine") or "",
