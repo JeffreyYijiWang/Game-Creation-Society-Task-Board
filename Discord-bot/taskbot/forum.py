@@ -8,6 +8,13 @@ from taskbot.db import count_task_claimers
 from taskbot.utils import split_tags
 
 
+def split_env_tags(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+
 def task_thread_title(task: dict) -> str:
     archive_prefix = "[ARCHIVED] " if task.get("archived") else ""
     claimed = count_task_claimers(task["id"])

@@ -18,6 +18,14 @@ from taskbot.utils import (
 )
 from taskbot.views import TaskControls
 
+def clamp_modal_placeholders(modal: discord.ui.Modal) -> None:
+    """Discord modal TextInput placeholders must be <= 100 characters."""
+    for child in getattr(modal, "children", []):
+        placeholder = getattr(child, "placeholder", None)
+        if isinstance(placeholder, str) and len(placeholder) > 100:
+            child.placeholder = placeholder[:97] + "..."
+
+
 
 class CommentModal(discord.ui.Modal, title="Add Task Comment"):
     comment = discord.ui.TextInput(label="Comment", placeholder="Write a short update or note...", style=discord.TextStyle.paragraph, max_length=1000)
@@ -45,6 +53,7 @@ class ProfileEditModal(discord.ui.Modal, title="Edit Your Task Profile"):
 
     def __init__(self, *, guild_id: int, user_id: int, existing: dict | None = None) -> None:
         super().__init__()
+        clamp_modal_placeholders(self)
         self.guild_id = guild_id
         self.user_id = user_id
         existing = existing or {}
@@ -110,9 +119,11 @@ class TaskCreateModal(discord.ui.Modal, title="Create Recruitment / Task Post"):
         custom_game_engine: str = "",
         game_programs: str = "",
         task_type: str = "Feature",
+        task_types: str | list[str] = "",
         template: dict | None = None,
     ) -> None:
         super().__init__()
+        clamp_modal_placeholders(self)
         self.bot = bot
         self.thumbnail_url = thumbnail_url or (template or {}).get("thumbnail_url", "")
         self.positions_needed = positions_needed or int((template or {}).get("positions_needed", 1))
@@ -120,6 +131,10 @@ class TaskCreateModal(discord.ui.Modal, title="Create Recruitment / Task Post"):
         self.dev_environment = normalize_dev_environments(dev_environment or (template or {}).get("dev_environment", "Windows"))
         self.game_engine = normalize_game_engine(game_engine or (template or {}).get("game_engine", "Unity"))
         self.custom_game_engine = custom_game_engine or (template or {}).get("custom_game_engine", "")
+        if isinstance(task_types, list):
+            self.task_types = ", ".join(task_types)
+        else:
+            self.task_types = task_types or (template or {}).get("task_types", "")
         self.game_programs = normalize_game_programs(game_programs or (template or {}).get("game_programs", ""))
         self.task_type = normalize_task_types(task_type or (template or {}).get("task_type", "Feature"))
         self.task_title.default = (template or {}).get("title", "")
@@ -155,21 +170,23 @@ class TaskCreateModal(discord.ui.Modal, title="Create Recruitment / Task Post"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not interaction.guild:
-            await interaction.response.send_message("Tasks can only be created inside a server.", ephemeral=True)
+            await interaction.followup.send("Tasks can only be created inside a server.", ephemeral=True)
             return
         title = str(self.task_title.value).strip()
         if not title:
-            await interaction.response.send_message("Task title cannot be empty.", ephemeral=True)
+            await interaction.followup.send("Task title cannot be empty.", ephemeral=True)
             return
         try:
             due_date = parse_due_date_to_iso(str(self.due_date.value))
         except ValueError:
-            await interaction.response.send_message("I could not parse the due date. Use `YYYY-MM-DD`.", ephemeral=True)
+            await interaction.followup.send("I could not parse the due date. Use `YYYY-MM-DD`.", ephemeral=True)
             return
         tags, links, programs = self.parse_tags_links_programs(str(self.links_programs.value))
         game_programs = programs or self.game_programs
         await interaction.response.defer(ephemeral=True)
         forum = await get_task_forum(self.bot)
+        if getattr(self, "task_types", ""):
+            tags = ", ".join(part for part in [self.task_types, locals().get("tags", "")] if part)
         task = create_task_record(
             guild_id=interaction.guild.id,
             forum_channel_id=forum.id,
@@ -200,6 +217,21 @@ class TaskCreateModal(discord.ui.Modal, title="Create Recruitment / Task Post"):
             await notify_new_task_subscribers(self.bot, updated)
         await interaction.followup.send(f"Created task #{task['id']}: {created.thread.mention}\nTo add images/docs/files, use `/task attach task_id:{task['id']}`.", ephemeral=True)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        import traceback
+
+        traceback.print_exception(type(error), error, error.__traceback__)
+        message = (
+            "The form failed while submitting. "
+            "Check the bot terminal for the traceback."
+        )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception:
+            pass
 
 class TaskEditModal(discord.ui.Modal, title="Edit Existing Task"):
     task_title = discord.ui.TextInput(label="Task title", max_length=100)
@@ -216,6 +248,7 @@ class TaskEditModal(discord.ui.Modal, title="Edit Existing Task"):
 
     def __init__(self, bot: commands.Bot, task: dict, *, thumbnail_url: str = "") -> None:
         super().__init__()
+        clamp_modal_placeholders(self)
         self.bot = bot
         self.task = task
         self.new_thumbnail_url = thumbnail_url
@@ -293,6 +326,7 @@ class TemplateSaveModal(discord.ui.Modal, title="Save / Edit Task Template"):
         existing: dict | None = None,
     ) -> None:
         super().__init__()
+        clamp_modal_placeholders(self)
         self.guild_id = guild_id
         self.owner_id = owner_id
         self.name = name
@@ -311,10 +345,12 @@ class TemplateSaveModal(discord.ui.Modal, title="Save / Edit Task Template"):
         self.links_programs.default = f"links: {(existing or {}).get('resource_links', '')}\nprograms: {self.game_programs}\ncustom_tags: {(existing or {}).get('tags', '')}".strip()
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        # Acknowledge the modal submit immediately; DB/forum work can take >3 seconds.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             due_date = parse_due_date_to_iso(str(self.due_date.value))
         except ValueError:
-            await interaction.response.send_message("Could not parse due date. Use `YYYY-MM-DD` or leave it blank.", ephemeral=True)
+            await interaction.followup.send("Could not parse due date. Use `YYYY-MM-DD` or leave it blank.", ephemeral=True)
             return
         tags, links, programs = TaskCreateModal.parse_tags_links_programs(str(self.links_programs.value))
         template = upsert_template(
@@ -337,4 +373,4 @@ class TemplateSaveModal(discord.ui.Modal, title="Save / Edit Task Template"):
             game_programs=programs or self.game_programs,
         )
         from taskbot.views import TemplateDetailView
-        await interaction.response.send_message(embed=template_embed(template), view=TemplateDetailView(interaction.client, template), ephemeral=True)  # type: ignore[arg-type]
+        await interaction.followup.send(embed=template_embed(template), view=TemplateDetailView(interaction.client, template), ephemeral=True)  # type: ignore[arg-type]

@@ -307,3 +307,40 @@ def info_page_embed() -> discord.Embed:
     emoji_lines = [f"{JOB_ROLE_EMOJIS[role]} — {role}" for role in JOB_ROLES]
     embed.add_field(name="Role notification reactions", value="\n".join(emoji_lines), inline=False)
     return embed
+
+def template_detail_embed(template: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"Template: {template.get('name', 'Unnamed')}",
+        description=template.get("description") or "No description saved.",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Task Title", value=template.get("title") or "Untitled task", inline=False)
+    embed.add_field(name="Priority", value=template.get("priority") or "Medium", inline=True)
+    embed.add_field(name="People Needed", value=str(template.get("positions_needed") or 1), inline=True)
+    embed.add_field(name="Job Role", value=template.get("job_role") or "Programmer", inline=True)
+    embed.add_field(
+        name="Dev Environment",
+        value=template.get("dev_environment") or template.get("dev_environments") or "Windows",
+        inline=True,
+    )
+    embed.add_field(name="Game Engine", value=template.get("game_engine") or "Unity", inline=True)
+    embed.add_field(name="Task Type / Tags", value=template.get("tags") or "None", inline=False)
+    embed.add_field(name="Links", value=(template.get("resource_links") or "None")[:1024], inline=False)
+    if template.get("thumbnail_url"):
+        embed.set_image(url=template["thumbnail_url"])
+    return embed
+
+
+def template_list_embed(templates: list[dict]) -> discord.Embed:
+    embed = discord.Embed(
+        title="Your Saved Templates",
+        description="Select a template below to view, edit, use, or publish it.",
+        color=discord.Color.gold(),
+    )
+    if not templates:
+        embed.add_field(name="No templates", value="Use `/template save` to create one.", inline=False)
+        return embed
+
+    lines = [f"`{t['name']}` — {t.get('title') or 'Untitled task'}" for t in templates[:25]]
+    embed.add_field(name="Templates", value="\n".join(lines), inline=False)
+    return embed

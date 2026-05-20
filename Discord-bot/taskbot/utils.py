@@ -80,6 +80,24 @@ def normalize_dev_environment(env: str | None) -> str:
     return normalize_choice(env, DEV_ENVIRONMENTS, "Windows")
 
 
+def normalize_dev_environments(envs: str | list[str] | None) -> str:
+    if not envs:
+        return "Windows"
+    if isinstance(envs, str):
+        raw_parts = [part.strip() for part in envs.split(",") if part.strip()]
+    else:
+        raw_parts = [str(part).strip() for part in envs if str(part).strip()]
+
+    valid: list[str] = []
+    seen: set[str] = set()
+    for part in raw_parts:
+        match = normalize_choice(part, DEV_ENVIRONMENTS, "")
+        if match and match not in seen:
+            seen.add(match)
+            valid.append(match)
+    return ", ".join(valid) if valid else "Windows"
+
+
 def normalize_dev_environments(raw: str | list[str] | tuple[str, ...] | None) -> str:
     """Normalize one or more dev environments into a comma-separated value."""
     if raw is None:
