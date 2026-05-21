@@ -99,37 +99,3 @@ async def sync_discord_task(bot: commands.Bot, task: dict) -> None:
         await thread.edit(archived=bool(task.get("archived")), locked=bool(task.get("archived")))
     except discord.HTTPException:
         pass
-
-# ---- v7 forum title override: no task id, bracketed tags ---------------------
-
-def _taskbot_title_parts(task: dict) -> list[str]:
-    parts: list[str] = []
-    def add(value: object, max_len: int = 18) -> None:
-        if value is None:
-            return
-        text = str(value).strip()
-        if not text:
-            return
-        for item in text.replace("\n", ",").split(","):
-            item = item.strip()
-            if item and item not in parts:
-                parts.append(item[:max_len])
-    add(task.get("priority"), 10)
-    add(task.get("job_role") or task.get("job_roles"), 18)
-    add(task.get("dev_environment") or task.get("dev_environments"), 12)
-    add(task.get("game_engine"), 12)
-    try:
-        from taskbot.db import get_claimers
-        capacity = int(task.get("positions_needed") or task.get("claim_capacity") or 1)
-        if len(get_claimers(int(task["id"]))) >= capacity:
-            add("Filled", 10)
-    except Exception:
-        pass
-    return parts[:4]
-
-
-def task_thread_title(task: dict) -> str:
-    title = str(task.get("title") or "Untitled Task").strip()
-    parts = _taskbot_title_parts(task)
-    prefix = f"[{' | '.join(parts)}] " if parts else ""
-    return (prefix + title)[:100]

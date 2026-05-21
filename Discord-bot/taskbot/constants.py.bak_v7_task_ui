@@ -66,7 +66,3 @@ STATUS_COLORS = {
     "Done": discord.Color.green(),
     "Archived": discord.Color.dark_grey(),
 }
-
-
-# User-facing label for development environment options.
-OS_OPTIONS = DEV_ENVIRONMENTS

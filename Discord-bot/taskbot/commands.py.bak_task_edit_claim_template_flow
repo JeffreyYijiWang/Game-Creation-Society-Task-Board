@@ -34,7 +34,6 @@ from taskbot.modals import ProfileEditModal, TaskCreateModal, TaskEditModal, Tem
 from taskbot.notifications import notify_claim
 from taskbot.utils import normalize_dev_environments, parse_due_date_to_iso
 from taskbot.views import DashboardView, ProfileCardView, TaskCreateWizardView, TemplateDetailView, TemplateListView, template_list_content
-from taskbot.template_edit_flow import TemplateEditStepOneView, template_edit_setup_embed
 
 
 async def command_channel_allowed(interaction: discord.Interaction) -> bool:
@@ -594,42 +593,46 @@ async def template_save(
     ))
 
 
-@template_group.command(name="edit", description="Edit a template with the same guided dropdown flow as task create")
+@template_group.command(name="edit", description="Edit an existing template")
+@app_commands.choices(
+    positions_needed=[app_commands.Choice(name=str(n), value=n) for n in POSITIONS_NEEDED_CHOICES],
+    game_engine=[app_commands.Choice(name=x, value=x) for x in GAME_ENGINES],
+)
 async def template_edit(
     interaction: discord.Interaction,
     name: str,
-    thumbnail: Optional[discord.Attachment] = None,
+    positions_needed: app_commands.Choice[int],
+    game_engine: app_commands.Choice[str],
+    job_roles: str = "Programmer",
+    dev_environments: str = "Windows",
     custom_game_engine: Optional[str] = None,
+    game_programs: Optional[str] = None,
+    task_types: str = "Feature",
+    thumbnail: Optional[discord.Attachment] = None,
 ) -> None:
     if not interaction.guild:
         await interaction.response.send_message("Templates only work inside a server.", ephemeral=True)
         return
     if not await require_task_assigner(interaction):
         return
-
-    template = get_template(interaction.guild.id, interaction.user.id, name)
-    if not template:
+    existing = get_template(interaction.guild.id, interaction.user.id, name)
+    if not existing:
         await interaction.response.send_message("Template not found. Use `/template save` first.", ephemeral=True)
         return
-
-    if thumbnail and thumbnail.content_type and not thumbnail.content_type.startswith("image/"):
-        await interaction.response.send_message("The template thumbnail must be an image attachment.", ephemeral=True)
-        return
-
-    if thumbnail or custom_game_engine:
-        template = dict(template)
-        if thumbnail:
-            template["thumbnail_url"] = thumbnail.url
-        if custom_game_engine:
-            template["custom_game_engine"] = custom_game_engine
-
-    await interaction.response.send_message(
-        "Edit dropdown/category values first, then continue to the template form to save changes.",
-        embed=template_edit_setup_embed(template, page=1),
-        view=TemplateEditStepOneView(template, interaction.user.id),
-        ephemeral=True,
-    )
-
+    await interaction.response.send_modal(TemplateSaveModal(
+        guild_id=interaction.guild.id,
+        owner_id=interaction.user.id,
+        name=name,
+        thumbnail_url=thumbnail.url if thumbnail else existing.get("thumbnail_url", ""),
+        positions_needed=positions_needed.value,
+        job_role=job_roles or existing.get("job_role", "Programmer"),
+        dev_environment=normalize_dev_environments(dev_environments or existing.get("dev_environment", "Windows")),
+        game_engine=game_engine.value,
+        custom_game_engine=custom_game_engine or existing.get("custom_game_engine", ""),
+        game_programs=game_programs or existing.get("game_programs", ""),
+        task_type=task_types or existing.get("task_type", "Feature"),
+        existing=existing,
+    ))
 
 
 @template_group.command(name="use", description="Import a saved template into the create form")

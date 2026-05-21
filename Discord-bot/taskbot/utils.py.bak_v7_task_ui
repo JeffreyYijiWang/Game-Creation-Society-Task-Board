@@ -189,23 +189,3 @@ def safe_int(value: int | str | None, default: int = 1) -> int:
         return int(value) if value is not None else default
     except ValueError:
         return default
-
-# ---- v7 due-date validation override ----------------------------------------
-
-def parse_due_date_to_iso(value: str | None) -> str:
-    from datetime import date, datetime
-    if not value or not str(value).strip():
-        return ""
-    raw = str(value).strip()
-    parsed = None
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
-        try:
-            parsed = datetime.strptime(raw, fmt).date()
-            break
-        except ValueError:
-            pass
-    if parsed is None:
-        raise ValueError("Due date must be YYYY-MM-DD, MM/DD/YYYY, or MM/DD/YY.")
-    if parsed < date.today():
-        raise ValueError("Due date cannot be in the past.")
-    return parsed.isoformat()

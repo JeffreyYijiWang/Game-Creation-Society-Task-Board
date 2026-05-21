@@ -19,12 +19,9 @@ from taskbot.db import (
     list_user_projects,
     search_tasks,
     update_task,
-
-    get_claimers,
-    remove_task_claim,)
+)
 from taskbot.forum import sync_discord_task
 from taskbot.embeds import create_guidance_embed, dashboard_board_embed, profile_embed, template_embed
-from taskbot.template_edit_flow import TemplateEditStepOneView, template_edit_setup_embed
 
 
 class TaskControls(discord.ui.View):
@@ -97,96 +94,10 @@ class TaskControls(discord.ui.View):
         from taskbot.modals import CommentModal
         await interaction.response.send_modal(CommentModal())
 
-    @discord.ui.button(label="Edit Task", style=discord.ButtonStyle.secondary, custom_id="taskbot:edit_task", row=2)
-    async def edit_task_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        task = await self.get_task_from_interaction(interaction)
-        if not task:
-            await interaction.response.send_message("Could not find this task in the database.", ephemeral=True)
-            return
-        if not isinstance(interaction.user, discord.Member) or not can_manage_task(interaction.user, task):
-            await interaction.response.send_message("Only admins or the task assigner who created this task can edit it.", ephemeral=True)
-            return
-        from taskbot.modals import TaskEditModal
-        await interaction.response.send_modal(TaskEditModal(interaction.client, task))  # type: ignore[arg-type]
-
-    @discord.ui.button(label="Remove Claimer", style=discord.ButtonStyle.danger, custom_id="taskbot:remove_claimer", row=2)
-    async def remove_claimer_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        task = await self.get_task_from_interaction(interaction)
-        if not task:
-            await interaction.response.send_message("Could not find this task in the database.", ephemeral=True)
-            return
-        if not isinstance(interaction.user, discord.Member) or not can_manage_task(interaction.user, task):
-            await interaction.response.send_message("Only admins or the task assigner who created this task can remove claimed people.", ephemeral=True)
-            return
-
-        claimers = get_claimers(task["id"])
-        if not claimers:
-            await interaction.response.send_message("No one has claimed this task yet.", ephemeral=True)
-            return
-
-        if len(claimers) == 1:
-            await interaction.response.defer(ephemeral=True)
-            ok, message, updated = remove_task_claim(task["id"], claimers[0], interaction.user.id)
-            if updated:
-                await sync_discord_task(interaction.client, updated)  # type: ignore[arg-type]
-            await interaction.followup.send(message, ephemeral=True)
-            return
-
-        await interaction.response.send_message(
-            "Choose which claimed person to remove from this task.",
-            view=RemoveClaimerView(task, claimers, interaction.guild),
-            ephemeral=True,
-        )
-
     @discord.ui.button(label="Archive", style=discord.ButtonStyle.danger, custom_id="taskbot:archive", row=1)
     async def archive(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.change_status(interaction, "Archived", archived=1)
 
-
-
-
-class RemoveClaimerSelect(discord.ui.Select):
-    def __init__(self, parent: "RemoveClaimerView", claimers: list[int]) -> None:
-        self.parent_view = parent
-        options: list[discord.SelectOption] = []
-        for user_id in claimers[:25]:
-            member = parent.guild.get_member(user_id) if parent.guild else None
-            label = member.display_name if member else f"User {user_id}"
-            options.append(
-                discord.SelectOption(
-                    label=label[:100],
-                    value=str(user_id),
-                    description=f"Remove claim from {label}"[:100],
-                )
-            )
-        super().__init__(
-            placeholder="Choose claimed person to remove",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        view = self.parent_view
-        if not isinstance(interaction.user, discord.Member) or not can_manage_task(interaction.user, view.task):
-            await interaction.response.send_message("Only admins or the task assigner who created this task can remove claimers.", ephemeral=True)
-            return
-
-        user_id = int(self.values[0])
-        await interaction.response.defer(ephemeral=True)
-        ok, message, updated = remove_task_claim(view.task["id"], user_id, interaction.user.id)
-        if updated:
-            await sync_discord_task(interaction.client, updated)  # type: ignore[arg-type]
-        await interaction.followup.send(message, ephemeral=True)
-
-
-class RemoveClaimerView(discord.ui.View):
-    def __init__(self, task: dict, claimers: list[int], guild: discord.Guild | None) -> None:
-        super().__init__(timeout=300)
-        self.task = task
-        self.guild = guild
-        if claimers:
-            self.add_item(RemoveClaimerSelect(self, claimers))
 
 class TaskCreateWizardView(discord.ui.View):
     def __init__(
@@ -514,12 +425,11 @@ class TemplateDetailView(discord.ui.View):
     @discord.ui.button(label="Edit Template", style=discord.ButtonStyle.primary)
     async def edit_template(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.send_message(
-            "Edit the dropdown/category values first, then press **Next: Engine / Tools** and **Continue to Template Form**.",
+            "Edit the dropdown/category values first, then press **Next: engine/tools** and **Continue to form** to edit the text fields.",
             ephemeral=True,
-            embed=template_edit_setup_embed(self.template, page=1),
-            view=TemplateEditStepOneView(self.template, interaction.user.id),
+            embed=create_guidance_embed(stage="main"),
+            view=TaskCreateWizardView(self.bot, interaction.user.id, template=self.template, mode="template_edit"),
         )
-
 
     @discord.ui.button(label="Delete Template", style=discord.ButtonStyle.danger)
     async def delete_template_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -568,69 +478,3 @@ class TemplatePicker(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         self.parent_view.selected_name = self.values[0]
         await interaction.response.defer(ephemeral=True)
-
-# ---- v7 task controls override ----------------------------------------------
-
-class UnclaimConfirmView(discord.ui.View):
-    def __init__(self, task: dict, user_id: int) -> None:
-        super().__init__(timeout=120)
-        self.task = task
-        self.user_id = user_id
-
-    @discord.ui.button(label="Confirm Unclaim", style=discord.ButtonStyle.danger, custom_id="taskbot:confirm_unclaim")
-    async def confirm_unclaim(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the person who opened this confirmation can use it.", ephemeral=True)
-            return
-        from taskbot.db import unclaim_task
-        from taskbot.forum import sync_discord_task
-        await interaction.response.defer(ephemeral=True)
-        ok, message, updated = unclaim_task(int(self.task["id"]), int(interaction.user.id))
-        if updated:
-            await sync_discord_task(interaction.client, updated)  # type: ignore[arg-type]
-        await interaction.followup.send(message, ephemeral=True)
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="taskbot:cancel_unclaim")
-    async def cancel_unclaim(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.edit_message(content="Cancelled.", view=None)
-
-
-class TaskControls(TaskControls):  # type: ignore[misc, no-redef]
-    """Wrapper around existing task controls: removes Comment and adds Unclaim."""
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        for child in list(self.children):
-            label = str(getattr(child, "label", "") or "").lower()
-            custom_id = str(getattr(child, "custom_id", "") or "").lower()
-            if "comment" in label or "comment" in custom_id:
-                try:
-                    self.remove_item(child)
-                except Exception:
-                    pass
-                continue
-            if label in {"claim", "claim task"} or "claim" in custom_id:
-                try:
-                    child.label = "Claim / Unclaim"
-                    child.style = discord.ButtonStyle.primary
-                except Exception:
-                    pass
-
-    @discord.ui.button(label="Unclaim", style=discord.ButtonStyle.secondary, custom_id="taskbot:unclaim_task", row=3)
-    async def unclaim_task_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        task = await self.get_task_from_interaction(interaction)
-        if not task:
-            await interaction.response.send_message("Could not find this task in the database.", ephemeral=True)
-            return
-        try:
-            from taskbot.db import get_claimers
-            claimers = get_claimers(int(task["id"]))
-        except Exception:
-            claimers = []
-        if int(interaction.user.id) not in claimers:
-            await interaction.response.send_message("You have not claimed this task.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            "Are you sure you want to unclaim this task?",
-            view=UnclaimConfirmView(task, int(interaction.user.id)),
-            ephemeral=True,
-        )
