@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import discord
 from discord.ext import commands
-
+from taskbot.components_v2_all import task_message_kwargs
 from taskbot.access import can_manage_task
 from taskbot.db import add_event, create_task_record, get_task_by_thread, update_task, upsert_profile, upsert_template
 from taskbot.embeds import task_embed, template_embed
@@ -17,6 +17,39 @@ from taskbot.utils import (
     parse_due_date_to_iso,
 )
 from taskbot.views import TaskControls
+
+# ---- v10 modal response helpers --------------------------------------------
+
+async def _taskbot_modal_reply(interaction, message: str, *, ephemeral: bool = True) -> None:
+    """Reply from a modal safely.
+
+    Modal submits often have not been deferred yet. Using followup before a
+    response can create Discord's 10015 Unknown Webhook error, so this helper
+    picks response vs followup correctly.
+    """
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(message, ephemeral=ephemeral)
+    except Exception:
+        try:
+            await interaction.user.send(message)
+        except Exception:
+            pass
+
+
+async def _taskbot_due_date_error(interaction, exc: Exception) -> None:
+    message = str(exc).strip() or "Due date must be YYYY-MM-DD."
+    lower = message.lower()
+    if "past" in lower:
+        message = "The due date cannot be in the past."
+    elif "date" in lower:
+        pass
+    else:
+        message = f"Due date error: {message}"
+    await _taskbot_modal_reply(interaction, message, ephemeral=True)
+
 
 def clamp_modal_placeholders(modal: discord.ui.Modal) -> None:
     """Discord modal TextInput placeholders must be <= 100 characters."""
@@ -178,8 +211,8 @@ class TaskCreateModal(discord.ui.Modal, title="Create Recruitment / Task Post"):
             return
         try:
             due_date = parse_due_date_to_iso(str(self.due_date.value))
-        except ValueError:
-            await interaction.followup.send("I could not parse the due date. Use `YYYY-MM-DD`.", ephemeral=True)
+        except ValueError as exc:
+            await _taskbot_due_date_error(interaction, exc)
             return
         tags, links, programs = self.parse_tags_links_programs(str(self.links_programs.value))
         game_programs = programs or self.game_programs
@@ -206,16 +239,17 @@ class TaskCreateModal(discord.ui.Modal, title="Create Recruitment / Task Post"):
             game_programs=game_programs,
             task_type=self.task_type,
         )
-        content = f"Task #{task['id']} created by {interaction.user.mention}."
-        if self.thumbnail_url:
-            content += f"\nThumbnail / gallery image: {self.thumbnail_url}"
-        created = await forum.create_thread(name=task_thread_title(task), content=content, embed=task_embed(task), view=TaskControls(), applied_tags=matching_forum_tags(forum, task))
+        created = await forum.create_thread(
+            name=task_thread_title(task),
+            applied_tags=matching_forum_tags(forum, task),
+            **task_message_kwargs(task),
+        )
         updated = update_task(task["id"], interaction.user.id, "discord_thread_created", thread_id=created.thread.id, message_id=created.message.id)
         if updated:
             await sync_discord_task(self.bot, updated)
             from taskbot.notifications import notify_new_task_subscribers
             await notify_new_task_subscribers(self.bot, updated)
-        await interaction.followup.send(f"Created task #{task['id']}: {created.thread.mention}\nTo add images/docs/files, use `/task attach task_id:{task['id']}`.", ephemeral=True)
+        await interaction.followup.send(f"Created task: {created.thread.mention} To add images/docs/files, use `/task attach task_id:{task['id']}`.", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         import traceback
@@ -281,7 +315,7 @@ class TaskEditModal(discord.ui.Modal, title="Edit Existing Task"):
         thumbnail_value = self.new_thumbnail_url or cat.get("thumbnail", self.task.get("thumbnail_url", ""))
         fields = {
             "title": str(self.task_title.value).strip() or self.task.get("title", ""),
-            "description": str(self.description.value).strip(),
+            "description": (str(self.description.value).strip() or "No description provided."),
             "priority": normalize_priority(pd.get("priority", self.task.get("priority", "Medium"))),
             "due_date": due_date,
             "tags": tags,

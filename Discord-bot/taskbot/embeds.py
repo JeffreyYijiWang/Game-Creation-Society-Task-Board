@@ -7,6 +7,35 @@ from taskbot.constants import JOB_ROLE_EMOJIS, JOB_ROLES, STATUS_COLORS
 from taskbot.db import count_task_claimers, get_attachments, get_claimers
 from taskbot.utils import engine_label, format_user, today_local
 
+# ---- v12 URL safety helpers -------------------------------------------------
+
+def _safe_discord_url(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(text)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return text
+    except Exception:
+        pass
+    return ""
+
+
+def _set_embed_image_if_valid(embed: discord.Embed, value: object) -> None:
+    url = _safe_discord_url(value)
+    if url:
+        embed.set_image(url=url)
+
+
+def _set_embed_thumbnail_or_avatar(embed: discord.Embed, value: object, fallback: object) -> None:
+    url = _safe_discord_url(value) or _safe_discord_url(fallback)
+    if url:
+        embed.set_thumbnail(url=url)
+
+
 
 def task_embed(task: dict) -> discord.Embed:
     status = task["status"]
@@ -27,7 +56,7 @@ def task_embed(task: dict) -> discord.Embed:
     embed.add_field(name="Openings", value=f"{claimed_count} / {needed} claimed", inline=True)
     embed.add_field(name="Task Type", value=task.get("task_type") or "Feature", inline=True)
     embed.add_field(name="Job Roles", value=task.get("job_role") or "Not specified", inline=True)
-    embed.add_field(name="Dev Environments", value=task.get("dev_environment") or "Not specified", inline=True)
+    embed.add_field(name="OS", value=task.get("dev_environment") or "Not specified", inline=True)
     embed.add_field(name="Game Engine", value=engine_label(task), inline=True)
     if task.get("game_programs"):
         embed.add_field(name="Programs / Tools Familiarity", value=task.get("game_programs") or "None", inline=False)
@@ -45,12 +74,41 @@ def task_embed(task: dict) -> discord.Embed:
             lines.append(f"[{item['filename']}]({item['url']}){note}")
         embed.add_field(name="Recent Attachments", value="\n".join(lines)[:1024], inline=False)
 
-    if task.get("thumbnail_url"):
-        embed.set_image(url=task["thumbnail_url"])
+    _set_embed_image_if_valid(embed, task.get("thumbnail_url"))
     if claimed_count >= needed:
         embed.add_field(name="Filled", value="This post has enough claimers.", inline=False)
     embed.set_footer(text=f"Updated: {task['updated_at']}")
     return embed
+
+
+def _profile_safe_url(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(text)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return text
+    except Exception:
+        pass
+    return ""
+
+
+def profile_image_embed(user: discord.abc.User, profile: dict | None = None) -> discord.Embed:
+    """Separate image-only embed so the main profile fields keep full width."""
+    profile = profile or {}
+    display_name = profile.get("display_name") or user.display_name
+    image_url = _profile_safe_url(profile.get("profile_image_url")) or str(user.display_avatar.url)
+
+    embed = discord.Embed(
+        title=f"{display_name}'s Task Profile",
+        color=discord.Color.blurple(),
+    )
+    embed.set_image(url=image_url)
+    return embed
+
 
 
 def profile_embed(user: discord.abc.User, stats: dict, max_active: int, profile: dict | None = None) -> discord.Embed:
@@ -77,6 +135,12 @@ def profile_embed(user: discord.abc.User, stats: dict, max_active: int, profile:
     return embed
 
 
+
+def profile_embeds(user: discord.abc.User, stats: dict, max_active: int, profile: dict | None = None) -> list[discord.Embed]:
+    return [
+        profile_embed(user, stats, max_active, profile),
+    ]
+
 def template_embed(template: dict) -> discord.Embed:
     embed = discord.Embed(
         title=f"Template: {template['name']}",
@@ -88,14 +152,13 @@ def template_embed(template: dict) -> discord.Embed:
     embed.add_field(name="Openings", value=str(template.get("positions_needed") or 1), inline=True)
     embed.add_field(name="Task Type", value=template.get("task_type") or "Feature", inline=True)
     embed.add_field(name="Job Roles", value=template.get("job_role") or "Programmer", inline=True)
-    embed.add_field(name="Dev Environments", value=template.get("dev_environment") or "Windows", inline=True)
+    embed.add_field(name="OS", value=template.get("dev_environment") or "Windows", inline=True)
     embed.add_field(name="Game Engine", value=template.get("game_engine") or "Unity", inline=True)
     embed.add_field(name="Custom Engine", value=template.get("custom_game_engine") or "None", inline=True)
     embed.add_field(name="Programs / Tools", value=template.get("game_programs") or "None", inline=False)
     embed.add_field(name="Tags", value=template.get("tags") or "None", inline=False)
     embed.add_field(name="Links", value=(template.get("resource_links") or "None")[:1024], inline=False)
-    if template.get("thumbnail_url"):
-        embed.set_image(url=template["thumbnail_url"])
+    _set_embed_image_if_valid(embed, template.get("thumbnail_url"))
     return embed
 
 
@@ -319,15 +382,14 @@ def template_detail_embed(template: dict) -> discord.Embed:
     embed.add_field(name="People Needed", value=str(template.get("positions_needed") or 1), inline=True)
     embed.add_field(name="Job Role", value=template.get("job_role") or "Programmer", inline=True)
     embed.add_field(
-        name="Dev Environment",
+        name="OS",
         value=template.get("dev_environment") or template.get("dev_environments") or "Windows",
         inline=True,
     )
     embed.add_field(name="Game Engine", value=template.get("game_engine") or "Unity", inline=True)
     embed.add_field(name="Task Type / Tags", value=template.get("tags") or "None", inline=False)
     embed.add_field(name="Links", value=(template.get("resource_links") or "None")[:1024], inline=False)
-    if template.get("thumbnail_url"):
-        embed.set_image(url=template["thumbnail_url"])
+    _set_embed_image_if_valid(embed, template.get("thumbnail_url"))
     return embed
 
 
@@ -415,9 +477,8 @@ def task_embed(task: dict) -> discord.Embed:
     embed.add_field(name="Authors", value=authors_text, inline=True)
     embed.add_field(name="Roles", value=str(roles), inline=True)
     embed.add_field(name="OS", value=str(os_value), inline=True)
-    embed.add_field(name="Engine / Program", value=str(engine), inline=True)
-    embed.add_field(name="Due", value=str(due), inline=True)
+    embed.add_field(name="Engine", value=str(engine), inline=True)
+    embed.add_field(name="Due Date", value=str(due), inline=True)
 
-    if task.get("thumbnail_url"):
-        embed.set_image(url=str(task["thumbnail_url"]))
+    _set_embed_image_if_valid(embed, task.get("thumbnail_url"))
     return embed

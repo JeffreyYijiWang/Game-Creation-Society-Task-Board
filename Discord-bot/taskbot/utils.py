@@ -207,5 +207,5 @@ def parse_due_date_to_iso(value: str | None) -> str:
     if parsed is None:
         raise ValueError("Due date must be YYYY-MM-DD, MM/DD/YYYY, or MM/DD/YY.")
     if parsed < date.today():
-        raise ValueError("Due date cannot be in the past.")
+        raise ValueError("The due date cannot be in the past.")
     return parsed.isoformat()

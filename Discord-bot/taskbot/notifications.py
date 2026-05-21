@@ -8,6 +8,7 @@ from taskbot.db import get_claimers, get_profile, get_profile_stats, update_task
 from taskbot.embeds import profile_embed
 from taskbot.forum import fetch_task_thread
 from taskbot.views import ProfileCardView
+from taskbot.components_v2 import generic_message_kwargs, generic_edit_kwargs
 
 
 async def safe_dm(user: discord.abc.User | None, content: str | None = None, *, embed: discord.Embed | None = None, view: discord.ui.View | None = None) -> bool:

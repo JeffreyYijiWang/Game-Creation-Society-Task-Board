@@ -35,6 +35,56 @@ from taskbot.notifications import notify_claim
 from taskbot.utils import normalize_dev_environments, parse_due_date_to_iso
 from taskbot.views import DashboardView, ProfileCardView, TaskCreateWizardView, TemplateDetailView, TemplateListView, template_list_content
 from taskbot.template_edit_flow import TemplateEditStepOneView, template_edit_setup_embed
+from taskbot.components_v2 import generic_message_kwargs, generic_edit_kwargs
+from taskbot.components_v2_all import generic_message_kwargs, generic_edit_kwargs, v2_demo_kwargs, task_message_kwargs, task_message_kwargs
+
+# ---- v10 search option helpers ---------------------------------------------
+
+try:
+    from discord import app_commands as _taskbot_app_commands
+except Exception:  # pragma: no cover
+    _taskbot_app_commands = None
+
+try:
+    from taskbot.constants import JOB_ROLES as _TASKBOT_JOB_ROLES
+except Exception:
+    _TASKBOT_JOB_ROLES = [
+        "Programmer", "2D Artist", "UI Artist", "Writer", "SFX", "VFX",
+        "Music Composer", "3D Artist", "3D Modeler", "Rigging",
+        "3D Animator", "2D Animator", "Playtester",
+    ]
+
+try:
+    from taskbot.constants import GAME_ENGINES as _TASKBOT_GAME_ENGINES
+except Exception:
+    _TASKBOT_GAME_ENGINES = ["Unity", "Unreal", "Godot", "Other"]
+
+try:
+    from taskbot.constants import DEV_ENVIRONMENTS as _TASKBOT_OS_OPTIONS
+except Exception:
+    _TASKBOT_OS_OPTIONS = ["Windows", "macOS", "Linux"]
+
+try:
+    from taskbot.constants import TASK_TYPES as _TASKBOT_TAG_OPTIONS
+except Exception:
+    _TASKBOT_TAG_OPTIONS = ["Bug Fix", "Feature", "Code", "Art", "2D", "3D", "UI", "Research", "Writing", "Sound"]
+
+
+def _taskbot_choices(values):
+    if _taskbot_app_commands is None:
+        return []
+    result = []
+    seen = set()
+    for value in values:
+        label = str(value).strip()
+        if not label or label.lower() in seen:
+            continue
+        seen.add(label.lower())
+        result.append(_taskbot_app_commands.Choice(name=label[:100], value=label[:100]))
+        if len(result) >= 25:
+            break
+    return result
+
 
 
 async def command_channel_allowed(interaction: discord.Interaction) -> bool:
@@ -92,10 +142,8 @@ async def publish_template_as_task_now(interaction: discord.Interaction, templat
 
     created = await forum.create_thread(
         name=task_thread_title(task),
-        content=f"Task #{task['id']} created from template `{template.get('name', 'template')}` by {interaction.user.mention}.",
-        embed=task_embed(task),
-        view=TaskControls(),
         applied_tags=matching_forum_tags(forum, task),
+        **task_message_kwargs(task),
     )
 
     updated = update_task(
@@ -109,7 +157,7 @@ async def publish_template_as_task_now(interaction: discord.Interaction, templat
         await sync_discord_task(interaction.client, updated)  # type: ignore[arg-type]
 
     await interaction.followup.send(
-        f"Published task #{task['id']} from template: {created.thread.mention}",
+        f"Published task from template: {created.thread.mention}",
         ephemeral=True,
     )
 
@@ -374,11 +422,28 @@ async def task_restore(interaction: discord.Interaction, task_id: int) -> None:
     status=[app_commands.Choice(name=s, value=s) for s in STATUS_CHOICES],
     priority=[app_commands.Choice(name=p, value=p) for p in PRIORITY_CHOICES],
 )
+
+# taskbot search v10 choices
+
+@app_commands.choices(
+    status=[app_commands.Choice(name=s, value=s) for s in STATUS_CHOICES],
+    priority=[app_commands.Choice(name=p, value=p) for p in PRIORITY_CHOICES],
+    job_roles=_taskbot_choices(_TASKBOT_JOB_ROLES),
+    game_engines=_taskbot_choices(_TASKBOT_GAME_ENGINES),
+    dev_environments=_taskbot_choices(_TASKBOT_OS_OPTIONS),
+    tag=_taskbot_choices(_TASKBOT_TAG_OPTIONS),
+)
+@app_commands.describe(
+    job_roles="Filter by job role.",
+    game_engines="Filter by engine/program.",
+    dev_environments="Filter by OS.",
+    tag="Filter by tag.",
+)
+
 async def task_search(
     interaction: discord.Interaction,
     status: Optional[app_commands.Choice[str]] = None,
     priority: Optional[app_commands.Choice[str]] = None,
-    task_types: Optional[str] = None,
     job_roles: Optional[str] = None,
     dev_environments: Optional[str] = None,
     game_engines: Optional[str] = None,
@@ -398,7 +463,6 @@ async def task_search(
         job_role=job_roles,
         dev_environment=dev_environments,
         game_engine=game_engines,
-        task_type=task_types,
         include_archived=include_archived,
         limit=10,
     )
@@ -456,6 +520,7 @@ async def task_profile(interaction: discord.Interaction, user: Optional[discord.
     stats = get_profile_stats(target.id, interaction.guild.id)
     profile = get_profile(interaction.guild.id, target.id)
     await interaction.response.send_message(embed=profile_embed(target, stats, settings.max_active_assignments, profile), view=ProfileCardView(target.id, interaction.guild.id), ephemeral=True)
+
 
 
 @task_group.command(name="edit_profile", description="Edit your task profile card")
@@ -590,7 +655,6 @@ async def template_save(
         game_engine=game_engine.value,
         custom_game_engine=custom_game_engine or "",
         game_programs=game_programs or "",
-        task_type=task_types,
     ))
 
 

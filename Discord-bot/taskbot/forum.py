@@ -6,6 +6,7 @@ from discord.ext import commands
 from taskbot.config import settings
 from taskbot.db import count_task_claimers
 from taskbot.utils import split_tags
+from taskbot.components_v2_all import task_message_kwargs, task_edit_kwargs, task_v2_title
 
 
 def split_env_tags(value: str | None) -> list[str]:
@@ -15,7 +16,7 @@ def split_env_tags(value: str | None) -> list[str]:
 
 
 
-def task_thread_title(task: dict) -> str:
+def task_v2_title(task: dict) -> str:
     archive_prefix = "[ARCHIVED] " if task.get("archived") else ""
     claimed = count_task_claimers(task["id"])
     needed = int(task.get("positions_needed") or 1)
@@ -86,13 +87,13 @@ async def sync_discord_task(bot: commands.Bot, task: dict) -> None:
     if not thread:
         return
     try:
-        await thread.edit(name=task_thread_title(task), applied_tags=matching_forum_tags(forum, task))
+        await thread.edit(name=task_v2_title(task), applied_tags=matching_forum_tags(forum, task))
     except discord.HTTPException:
         pass
     if task.get("message_id"):
         try:
             starter_message = await thread.fetch_message(task["message_id"])
-            await starter_message.edit(embed=task_embed(task), view=TaskControls())
+            await starter_message.edit(**task_edit_kwargs(task))
         except discord.HTTPException:
             pass
     try:
@@ -128,8 +129,13 @@ def _taskbot_title_parts(task: dict) -> list[str]:
     return parts[:4]
 
 
-def task_thread_title(task: dict) -> str:
+def task_v2_title(task: dict) -> str:
     title = str(task.get("title") or "Untitled Task").strip()
     parts = _taskbot_title_parts(task)
     prefix = f"[{' | '.join(parts)}] " if parts else ""
     return (prefix + title)[:100]
+
+# Compatibility name for older imports/calls.
+# The v2 implementation still uses bracketed tags and removes task ids.
+def task_thread_title(task: dict) -> str:
+    return task_v2_title(task)
